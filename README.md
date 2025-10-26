@@ -3,8 +3,7 @@ Course project for the course *Information Theory and Inference* at the Universi
 
 Contributors:
 - Marco Foster ([@MarcoTFoster](https://github.com/MarcoTFoster))
-- Laura Schulze (([@lm-schulze](https://github.com/lm-schulze)))
-- Savina Tsichli (([@savinats](https://github.com/savinats)))
-
+- Laura Schulze ([@lm-schulze](https://github.com/lm-schulze))
+- Savina Tsichli ([@savinats](https://github.com/savinats)))
 The project consists of the following files and folders (to be updated as the project progresses):
 - **filename**: file description.
