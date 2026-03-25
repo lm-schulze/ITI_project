@@ -7,4 +7,5 @@ Contributors:
 - Savina Tsichli ([@savinats](https://github.com/savinats))
   
 The project consists of the following files and folders (to be updated as the project progresses):
-- **filename**: file description.
+- **test_graphs/**: folder containing test graphs exported as GraphML, (weighted/unweighted, directed/undirected); as well as visualizations of each graph as .pdf
+- `Test_networks.ipynb`: Jupyter notebook containing the SBM-based graph generation function used to generate the test graphs. Uses the igraph library.
