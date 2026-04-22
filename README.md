@@ -9,3 +9,4 @@ Contributors:
 The project consists of the following files and folders (to be updated as the project progresses):
 - **test_graphs/**: folder containing test graphs exported as GraphML, (weighted/unweighted, directed/undirected); as well as visualizations of each graph as .pdf
 - `Test_networks.ipynb`: Jupyter notebook containing the SBM-based graph generation function used to generate the test graphs. Uses the igraph library.
+- `Test_infomap.ipynb`: Jupyter notebook containing a self-implemented version of the Infomap description length computation via map equation. Uses the igraph library.
