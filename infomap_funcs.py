@@ -57,7 +57,10 @@ def compute_exit_flow(g: ig.Graph, communities: list[int], p: np.ndarray) -> np.
     betw_communities = src_com != trg_com # true if edge connects different communities
 
     # exit flow on each edge:
-    flow = p[src] * weights / out_strength[src] # flow on each edge, proportional to node visit frequency and edge weight
+    #flow = p[src] * weights / out_strength[src] # flow on each edge, proportional to node visit frequency and edge weight
+    # handle out_strength = 0 case
+    flow = np.where(out_strength[src] > 0, p[src] * weights / out_strength[src], 0.0)  # dangling → 0 flow
+
     exit_flow = np.zeros(max(communities) + 1) # initialise exit weight array
     np.add.at(exit_flow, src_com[betw_communities], flow[betw_communities]) 
 
@@ -153,14 +156,6 @@ def compute_description_length(g: ig.Graph, communities: list[int], tau: float =
         # compute module exit probabilities with teleportation correction:
         q_mod = tau * (N-np.bincount(communities, minlength=num_communities)) / N * p_mod \
             + (1-tau) * exit_flow
-        if verbose:
-            # diagnostics:
-            print("p sum:        ", p.sum())
-            print("p_mod sum:    ", p_mod.sum())       # should equal p.sum() = 1
-            print("exit_flow sum:", exit_flow.sum())   # should be < 1
-            print("q_mod sum:    ", q_mod.sum())       # should be < 1
-            print("p_loop sum:   ", p_loop.sum())      # should be > 1 (= 1 + q_sum)
-            print("any nan/inf:", np.any(~np.isfinite(q_mod)), np.any(~np.isfinite(p)))
             
     else:
         weights = np.array(g.es["weight"] if g.is_weighted() else [1.0] * g.ecount())
@@ -178,22 +173,29 @@ def compute_description_length(g: ig.Graph, communities: list[int], tau: float =
 
     q_sum = np.sum(q_mod) # total exit probability  
     p_loop = p_mod + q_mod
+
+    exit_data = exit_flow if g.is_directed() else exit_weights
+
+    if verbose:
+        # diagnostics:
+        print("p sum:        ", p.sum())
+        print("p_mod sum:    ", p_mod.sum())       # should equal p.sum() = 1
+        print("exit_data sum:", exit_data.sum())   # should be < 1
+        print("q_mod sum:    ", q_mod.sum())       # should be < 1
+        print("p_loop sum:   ", p_loop.sum())      # should be > 1 (= 1 + q_sum)
+        print("any nan/inf:", np.any(~np.isfinite(q_mod)), np.any(~np.isfinite(p)))
         
     # compute via map equation
     L = safe_xlogx(q_sum) - 2*np.sum(safe_xlogx(q_mod)) \
         - np.sum(safe_xlogx(p)) + np.sum(safe_xlogx(p_loop))    
 
     if returnTerms:
-
-        if g.is_directed():
-            return L, p, p_mod, exit_flow 
-        else:
-            return L, p, p_mod, exit_weights
+        return L, p, p_mod, exit_data
     else:   
         return L
 
 
-def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_old: list[int], comm1: int, comm2:int ) -> np.ndarray:
+def update_merge_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_old: list[int], comm1: int, comm2:int ) -> np.ndarray:
     """ Compute the change in exit weights & update if 2 communities are merged.
         This can be used for search algorithms that iteratively merge communities to improve the partitioning.
 
@@ -230,14 +232,15 @@ def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_ol
     # New exit weight for merged community
     new_exit_merged = exit_weights_old[comm1] + exit_weights_old[comm2] - 2 * inter_weight
     
-    # Create new exit weights array, remove comm2 and shift
-    exit_weights_updated = np.delete(exit_weights_old, comm2)
+    # Create new exit weights array, set comm2 to 0
+    exit_weights_updated = exit_weights_old.copy()
     exit_weights_updated[comm1] = new_exit_merged
+    exit_weights_updated[comm2] = 0.0   # mark as empty; array length and all other indices unchanged
     
     return exit_weights_updated
 
 # it's a bit funkier when we're dealing with directed networks:
-def update_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray, exit_flow_old: np.ndarray, comm1: int, comm2: int) -> np.ndarray:
+def update_merge_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray, exit_flow_old: np.ndarray, comm1: int, comm2: int) -> np.ndarray:
     """Compute the change in community exit flow if 2 communities are merged.
     This can be used for search algorithms that iteratively merge communities to improve the partitioning.
 
@@ -272,21 +275,22 @@ def update_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray, exi
     # Edges between comm1 and comm2
     betw_12 = ((src_com == comm1) & (trg_com == comm2)) | ((src_com == comm2) & (trg_com == comm1))
     
-    # Flow on those edges (only from src)
-    flow_inter = p[src[betw_12]] * weights[betw_12] / out_strength[src[betw_12]]
+    # Flow on those edges (only from src), while handling out_strength 0 case
+    flow_inter = np.where(out_strength[src[betw_12]] > 0, p[src[betw_12]] * weights[betw_12] / out_strength[src[betw_12]], 0.0)  # dangling → 0 flow
     inter_flow_sum = np.sum(flow_inter)
     
     # New exit flow for merged community
     new_exit_merged = exit_flow_old[comm1] + exit_flow_old[comm2] - inter_flow_sum
     
     # Create new exit flow array, remove comm2 and shift
-    exit_flow_updated = np.delete(exit_flow_old, comm2)
+    exit_flow_updated = exit_flow_old.copy()
     exit_flow_updated[comm1] = new_exit_merged
+    exit_flow_updated[comm2] = 0.0
     
     return exit_flow_updated
 
 
-def update_description_length(g: ig.Graph, communities_old: list[int], p_old: np.ndarray, p_mod_old: np.ndarray, exits_old: np.ndarray, comm1: int, comm2: int, tau: float = 0.15, returnTerms: bool = False, verbose: bool = False) -> float:
+def update_merge_description_length(g: ig.Graph, communities_old: list[int], p_old: np.ndarray, p_mod_old: np.ndarray, exits_old: np.ndarray, comm1: int, comm2: int, tau: float = 0.15, returnTerms: bool = False, verbose: bool = False) -> float:
     """Compute the change in description length if 2 communities are merged.
         This can be used for search algorithms that iteratively merge communities to improve the partitioning.
 
@@ -317,17 +321,19 @@ def update_description_length(g: ig.Graph, communities_old: list[int], p_old: np
     N = g.vcount()
     
     # Update p_mod
-    p_mod_new = np.delete(p_mod_old, comm2)
+    p_mod_new = p_mod_old.copy()
     p_mod_new[comm1] += p_mod_old[comm2]
+    p_mod_new[comm2] = 0.0
     
     if g.is_directed():
         # Update node counts
         node_counts_old = np.bincount(communities_old, minlength=num_communities)
-        node_counts_new = np.delete(node_counts_old, comm2)
+        node_counts_new = np.copy(node_counts_old)
+        node_counts_new[comm2] = 0
         node_counts_new[comm1] += node_counts_old[comm2]
         
         # Update exit flows
-        exit_flow_new = update_exit_flow(g, communities_old, p_old, exits_old, comm1, comm2)
+        exit_flow_new = update_merge_exit_flow(g, communities_old, p_old, exits_old, comm1, comm2)
         
         # Compute q_mod
         q_mod = tau * (N - node_counts_new) / N * p_mod_new + (1 - tau) * exit_flow_new
@@ -345,7 +351,7 @@ def update_description_length(g: ig.Graph, communities_old: list[int], p_old: np
         total_weight_x2 = 2 * np.sum(weights)
         
         # Update exit weights
-        exit_weights_new = update_exit_weights(g, communities_old, exits_old, comm1, comm2)
+        exit_weights_new = update_merge_exit_weights(g, communities_old, exits_old, comm1, comm2)
         
         # Compute q_mod
         q_mod = exit_weights_new / total_weight_x2
@@ -360,7 +366,7 @@ def update_description_length(g: ig.Graph, communities_old: list[int], p_old: np
     exit_data = exit_flow_new if g.is_directed() else exit_weights_new
 
     if returnTerms:
-        return L, communities_new, p_old, p_mod_old, exit_data
+        return L, communities_new, p_old, p_mod_new, exit_data
 
     else:   
         return L
