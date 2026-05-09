@@ -569,7 +569,10 @@ def update_node_move_description_length(g: ig.Graph, communities_old: list[int],
     # if source community == target community: no change in description length.
     if comm_src == comm_trg:
         warnings.warn(f"Node already in target community {comm_trg}! No change in description length.")
-        return None
+        if returnTerms:
+            return None, communities_old, exits_old 
+        else:
+            return None
     
     communities_old = np.array(communities_old)
     communities_new = communities_old.copy()
@@ -628,7 +631,7 @@ def update_node_move_description_length(g: ig.Graph, communities_old: list[int],
     
 
     if returnTerms:
-        return L, communities_new, p_old, p_mod_old, exit_data
+        return L, communities_new, exit_data
 
     else:   
         return L
