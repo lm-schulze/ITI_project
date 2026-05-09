@@ -1,6 +1,7 @@
 # library imports
 import igraph as ig
 import numpy as np
+import random
 import warnings
 
 def generate_sbm(n, c, p_in, p_out, directed=False, weighted=False):
@@ -46,6 +47,46 @@ def generate_sbm(n, c, p_in, p_out, directed=False, weighted=False):
         g.es["weight"] = np.random.rand(g.ecount())
 
     return g
+
+# little helper for plotting purposes
+# might make a a seperate python file for all utility functions later on
+def visual_community_colors(g: ig.Graph, communities=None, skipLayout=False):
+    """Creates dict of plotting arguments for visualising networks with community assignments.
+    Nodes are colored according to their community, edge width is proportional to edge weights
+    if the network is weighted. Community assignments can either be explicitly passed via the 
+    "communities" argument or as vertex attribute "community" of input graph g. Basic usage for
+    plotting an igraph.Graph g:
+    ig.plot(g, **visual_community_colors(g))
+
+    Args:
+        g (ig.Graph): Input graph to plot.
+        communities (list[int], optional): Explicit community assignment for each node. Defaults 
+                to None.
+        skipLayout (bool, optional): If True, layout is not specified in the resulting dict. Use
+                if you want to specify the layout seperately, e.g. to be consistent for multiple
+                plots of the same network. Defaults to False.
+
+    Returns:
+        dict: Dict of visual style settings to be passed to igraph.plot()
+    """
+    if communities is None and "community" in g.vertex_attributes():
+        communities = g.vs["community"]
+    c = len(communities)
+    palette = ig.RainbowPalette(n=c)
+
+    visual_style = {}
+    visual_style["vertex_size"] = 20
+    visual_style["vertex_color"] = [palette.get(i) for i in communities] if communities is not None else "lightblue"
+    visual_style
+    if not skipLayout:
+        visual_style["layout"] = g.layout('fr')
+    visual_style["bbox"] = (400, 400)
+    visual_style["margin"] = 20
+    visual_style["vertex_label_angle"] = 90
+    visual_style["vertex_label_dist"] = 2.
+    visual_style["edge_width"] = [1+w * 5 for w in g.es["weight"]] if "weight" in g.edge_attributes() else 1
+    visual_style["edge_color"] = "rgba(1,1,1,0.7)" if "weight" in g.edge_attributes() else "rgba(1,1,1,1)"
+    return visual_style
 
 def compute_exit_weights(g: ig.Graph, communities: list[int]) -> np.ndarray:
     """Compute community exit weights for a given undirected graph and community partition.
@@ -122,7 +163,8 @@ def safe_xlogx(x):
     Returns:
         _type_: x*log2(x) for x > 0, and 0 for x <= 0
     """
-    return np.where(x > 0, x * np.log2(x), 0.0)
+    safe_x = np.where(x > 0.0, x, 1.0)   # replace 0s with 1 to avoid that pesky Divide By 0 issue
+    return np.where(x > 0.0, safe_x * np.log2(safe_x), 0.0) # set these points manually to 0
 
 # originally based off of the PageRank Wikipedia, hehe
 # but changed to row-stochastic, and with dangling node handling
@@ -218,7 +260,10 @@ def compute_description_length(g: ig.Graph, communities: list[int], tau: float =
     q_sum = np.sum(q_mod) # total exit probability  
     p_loop = p_mod + q_mod
 
-    exit_data = exit_flow if g.is_directed() else exit_weights
+    if g.is_directed():
+        exit_data = exit_flow
+    else:
+        exit_data = exit_weights
 
     if verbose:
         # diagnostics:
@@ -407,7 +452,10 @@ def update_merge_description_length(g: ig.Graph, communities_old: list[int], p_o
     L = safe_xlogx(q_sum) - 2*np.sum(safe_xlogx(q_mod)) \
         - np.sum(safe_xlogx(p_old)) + np.sum(safe_xlogx(p_loop))    
     
-    exit_data = exit_flow_new if g.is_directed() else exit_weights_new
+    if g.is_directed():
+        exit_data = exit_flow_new
+    else:
+        exit_data = exit_weights_new
 
     if returnTerms:
         return L, communities_new, p_old, p_mod_new, exit_data
@@ -613,7 +661,10 @@ def update_node_move_description_length(g: ig.Graph, communities_old: list[int],
     q_sum = np.sum(q_mod) # total exit probability  
     p_loop = p_mod_new + q_mod
 
-    exit_data = exit_flow_new if g.is_directed() else exit_weights_new
+    if g.is_directed():
+        exit_data = exit_flow_new
+    else:
+        exit_data = exit_weights_new
 
     if verbose:
         # diagnostics:
@@ -635,3 +686,86 @@ def update_node_move_description_length(g: ig.Graph, communities_old: list[int],
 
     else:   
         return L
+
+
+def node_movement_optimization(g, returnTerms=False, verbose=False):
+    """Optimize community assignment of single nodes by sequentially iterating through them
+    in a random order and assigning them to the neighbouring community that yields the greatest
+    decrease in description length (or leaving them if current community yields lowest description length). 
+    Repeats until no further improving node moves are possible. Corresponds to Phase 1 of the optimization 
+    algorithm.
+
+    Args:
+        g (igraph.Graph): Input graph. Also supports directed and/or weighted graphs.
+        returnTerms (bool, optional): Whether to return additional information besides best community
+                                      assignment. Defaults to False.
+        verbose (bool, optional): Whether to print info for debugging. Defaults to False.
+
+    Returns:
+        list[int]: List of best community assignments found. If returnTerms is True, also returns 
+                   description length L and community exit flows/weights of current structure.
+    """
+    nodes = g.vs.indices # get list of nodes
+    N_nodes = g.vcount()
+    neighborhood = g.neighborhood(mindist=1) # get list of neighbours for all nodes
+    #neighborhood = [np.array(nbs) for nbs in neighborhood] # convert to list of numpy arrays for easier indexing
+
+    # initialize community partition with each node being its own community
+    communities = np.arange(N_nodes) # start with each node assigned to its own community
+
+    # compute description length including some intermediate terms:
+    L, p, p_mod, exit_data = compute_description_length(g, communities, returnTerms=True)
+
+    if verbose:
+        print(f"Starting from description length: {L}")
+
+    optimizable=True
+    while optimizable: # while there are still improvements via node moves:
+        # randomize node sequence
+        random.shuffle(nodes)
+
+        # track how many nodes remain in their og community
+        no_move_ctr = 0
+
+        # for each node go through neighbours (if different community(?))
+        for n in nodes:
+            neighbors = neighborhood[n] # get neighbors of node
+            nb_comms = communities[neighbors] # get communties of neighbors
+            src_comm = communities[n] # community the current node is in
+            comms_to_test = np.unique(nb_comms) # get unique neighbor communities
+            comms_to_test = comms_to_test[comms_to_test != src_comm] # remove node's own community from communities to test
+            
+            L_best, communities_best, exits_data_best = L, communities, exit_data 
+            # go through unique neighbouring communities  
+            for nbc in comms_to_test:
+                # get new description length for assigning node to different community
+                L_new, communities_new, exit_data_new = update_node_move_description_length(g, communities, p, p_mod, exit_data, n, nbc, returnTerms=True)
+                if L_new is not None and L_new < L_best: # if better description length
+                    # update best constellation
+                    L_best, communities_best, exits_data_best = L_new, communities_new, exit_data_new
+            
+            # check if a change has been made
+            if communities[n] == communities_best[n]: 
+                no_move_ctr += 1
+
+            # take over the new best community partition & data (might be identical with old one)
+            L, communities, exit_data = L_best, communities_best, exits_data_best
+        
+        # only stop optimizing if not a single improving move has been made in the sequence
+        # otherwise keep optimizing
+        optimizable = no_move_ctr < N_nodes 
+
+        if verbose:
+            print(f"Number of nodes that have been moved this iteration: {N_nodes-no_move_ctr}")
+            if optimizable:
+                print("Continuing optimization.")
+            else: 
+                print("Optimization finished!")
+
+    if verbose:
+        print(f"Final description length: {L}")
+
+    if returnTerms:
+        return communities, L, exit_data
+    else:
+        return communities
