@@ -736,7 +736,7 @@ def node_movement_optimization(g, returnTerms=False, verbose=False):
             comms_to_test = np.unique(nb_comms) # get unique neighbor communities
             comms_to_test = comms_to_test[comms_to_test != src_comm] # remove node's own community from communities to test
             
-            L_best, communities_best, exit_data_best = L, communities, exit_data 
+            L_best, communities_best, p_mod_best, exit_data_best = L, communities, p_mod, exit_data 
             # go through unique neighbouring communities  
             for nbc in comms_to_test:
                 # get new description length for assigning node to different community
