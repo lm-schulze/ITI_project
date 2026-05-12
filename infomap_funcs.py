@@ -768,6 +768,119 @@ def node_movement_optimization(g, returnTerms=False, verbose=False):
         print(f"Final description length: {L}")
 
     if returnTerms:
-        return communities, L, exit_data
+        return communities, L, p_mod, exit_data
     else:
         return communities
+    
+    
+
+def compress_network(g: ig.Graph, communities: list[int], verbose=False) -> tuple:
+    """
+    Implements Phase 2 of the infomap search algorithm. Compresses the network by
+    collapsing each community into a single super-node and aggregating edge weights,
+    with within-community edges resulting in self-loops.
+
+    Args:
+    g (ig.Graph): Input graph. Supports directed/undirected and weighted/unweighted.
+    communities (list[int] or np.ndarray): Community label for each node of g. Labels
+        need not be 0-indexed or contiguous (e.g. after previous merge steps some 
+        labels may be absent from the range).
+    verbose (bool, optional): Whether to print verbose output for debugging. Defaults to False.
+
+    Returns:
+    g_compressed (ig.Graph): Compressed graph with len(np.unique(communities)) nodes.
+        Always weighted (aggregated weights stored as the "weight" edge attribute).
+        Directedness matches the input graph. May contain self-loops.
+    community_map (np.ndarray): Sorted array of the unique original community labels,
+        where community_map[i] is the original label of super-node i in
+        g_compressed. Because the array is sorted, np.searchsorted can
+        cheaply convert original community labels to compressed-node indices.
+    """
+    communities = np.array(communities)
+
+    # --- Get 0-indexed node IDs for communities -------------------------
+    # The plan is to get a sorted list of the unique communities, and have the node
+    # indices of the compressed graph correspond to the list indices of the corresponding
+    # community in the sorted list. The list will be returned alongside the compressed Graph
+    # to allow recovery of original community assignments
+    unique_communities = np.unique(communities) # get all unique community labels, sorted
+    n_communities = int(len(unique_communities)) # get number of communities
+
+    # For each original node, get the position of its community label in the sorted
+    # unique_communities array 
+    node_to_compressed = np.searchsorted(unique_communities, communities)
+    # basically contains for each node the index of the community instead of the community label
+    # these indices will be the supernode indices of the compressed graph
+
+    if verbose:
+        print(f"Input graph has {n_communities} unique communities, {g.vcount()} nodes and {g.ecount()} edges.")
+
+
+    # --- Build compressed edge list with aggregated weights -----------------
+    # We'll basically build a graph with a number of nodes = number of communities
+    # and then insert the correctly aggregated edges that we compute here
+    if g.ecount() > 0: # if we have edges get the weights
+        weights = np.array(
+            g.es["weight"] if g.is_weighted else np.ones(g.ecount()),
+            dtype=np.float64
+        )
+        edges = np.array(g.get_edgelist(), dtype=np.int64) # build edgelist
+
+        # map each start/endpoint to its compressed-graph node index
+        # so basically instead of (starting node, ending node) we now have
+        # the community indices (starting community, ending community)
+        new_src = node_to_compressed[edges[:, 0]].astype(np.int64)  
+        new_trg = node_to_compressed[edges[:, 1]].astype(np.int64)
+
+        # Encode each (src, trg) pair as a single int64 key for O(E log E)
+        # aggregation via np.unique instead of a Python dict loop.
+        # with this, basically src = edge_key // n_communities, 
+        # trg = edge_key % n_communities
+        edge_keys = new_src * np.int64(n_communities) + new_trg
+        # with this, any edges connecting the same communities a and b will have the same edge key
+        # which we can then use to aggregate the weights
+
+        # Sum weights of all edges that map to the same (src, trg) pair.
+        # First, np.unique gives the unique keys and an inverse mapping; 
+        unique_keys, inverse_idx = np.unique(edge_keys, return_inverse=True)
+        # gets sorted unique edge keys, and a list containing for each edge_key (so for each edge)
+        # in the original list the index of the key in the unique_keys list (inverse mapping)
+
+        # np.add.at accumulates weights into the correct bucket in one vectorised pass.
+        agg_weights = np.zeros(len(unique_keys), dtype=np.float64) # init array for edge weight aggregation
+        np.add.at(agg_weights, inverse_idx, weights) 
+        # adds the weights of each edge to the element in agg_weights whose index corresponds
+        # to the inverse_idx of that edge, which is the same as the index of the unique keys
+        # so for any edges connecting the same communities a and b (who will have the same 
+        # edge_key, and thus the same inverse_idx), the weights are summed.
+
+        # Decode integer keys back to (src, trg) pairs
+        # keeping only the unique ones
+        compressed_src = (unique_keys // n_communities).tolist() 
+        compressed_trg = (unique_keys %  n_communities).tolist()
+        new_edges = list(zip(compressed_src, compressed_trg)) 
+
+    else:                       # original graph has no edges
+        new_edges = []
+        agg_weights = np.array([], dtype=np.float64)
+
+    # --- Assemble the compressed igraph.Graph --------------------------------
+    # self-loops from intra-community edges are explicitly required here and are handled
+    # correctly by compute_description_length (they satisfy src_com == trg_com
+    # and are therefore excluded from exit weights/flows by those helpers).
+    # GOD I HOPE THAT'S ACTUALLY TRUE 
+
+    if verbose:
+        print(f"Creating compressed graph with {n_communities} nodes, {len(new_edges)} aggregated edges.")
+
+    # create graph with # nodes = # communities of g
+    g_compressed = ig.Graph(n=n_communities, directed=g.is_directed())  
+    if new_edges: # if we have any edges to add
+        g_compressed.add_edges(new_edges) # add the new aggregated edges
+        g_compressed.es["weight"] = agg_weights.tolist() # assign them the aggregated weights
+    
+    # Return a copy so callers cannot accidentally mutate the internal array
+    # we should be able to reconstruct the assignments from the unique_communites list
+    # as it contains the mapping of og community -> compressed node index (== list index)
+    return g_compressed, unique_communities.copy()
+
