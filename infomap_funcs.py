@@ -821,7 +821,7 @@ def compress_network(g: ig.Graph, communities: list[int], verbose=False) -> tupl
     # and then insert the correctly aggregated edges that we compute here
     if g.ecount() > 0: # if we have edges get the weights
         weights = np.array(
-            g.es["weight"] if g.is_weighted else np.ones(g.ecount()),
+            g.es["weight"] if g.is_weighted() else np.ones(g.ecount()),
             dtype=np.float64
         )
         edges = np.array(g.get_edgelist(), dtype=np.int64) # build edgelist
