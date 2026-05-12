@@ -84,7 +84,8 @@ def visual_community_colors(g: ig.Graph, communities=None, skipLayout=False):
     visual_style["margin"] = 20
     visual_style["vertex_label_angle"] = 90
     visual_style["vertex_label_dist"] = 2.
-    visual_style["edge_width"] = [1+w * 5 for w in g.es["weight"]] if "weight" in g.edge_attributes() else 1
+    max_weight = max(g.es["weight"]) if "weight" in g.edge_attributes() else 1
+    visual_style["edge_width"] = [1+ 5*w/max_weight for w in g.es["weight"]] if "weight" in g.edge_attributes() else 1
     visual_style["edge_color"] = "rgba(1,1,1,0.7)" if "weight" in g.edge_attributes() else "rgba(1,1,1,1)"
     return visual_style
 
@@ -99,7 +100,7 @@ def compute_exit_weights(g: ig.Graph, communities: list[int]) -> np.ndarray:
     Returns:
         np.ndarray: Exit weights for each community.
     """
-    weights = np.array(g.es["weight"] if g.is_weighted() else [1.0] * g.ecount())
+    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
     communities = np.array(communities) # community membership list for each node
     exit_weights = np.zeros(max(communities) + 1) # initialise exit weight array
 
@@ -132,7 +133,7 @@ def compute_exit_flow(g: ig.Graph, communities: list[int], p: np.ndarray) -> np.
 
     communities = np.array(communities) # community membership list for each node
     out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None)) # strength of outgoing links for each node
-    weights = np.array(g.es["weight"] if g.is_weighted() else [1.0] * g.ecount())
+    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
     edges = np.array(g.get_edgelist(), dtype=int) # array of edges
 
     src = edges[:, 0] # community of source node for each edge
@@ -244,7 +245,7 @@ def compute_description_length(g: ig.Graph, communities: list[int], tau: float =
             + (1-tau) * exit_flow
             
     else:
-        weights = np.array(g.es["weight"] if g.is_weighted() else [1.0] * g.ecount())
+        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
         total_weight_x2 = 2 * np.sum(weights) # total weight of all edges (x2 for undirected graphs)
 
         # compute ergodic node visit frequencies
@@ -309,7 +310,7 @@ def update_merge_exit_weights(g: ig.Graph, communities_old: list[int], exit_weig
     
     communities = np.array(communities_old)
     exit_weights_old = np.array(exit_weights_old)
-    weights = np.array(g.es["weight"] if g.is_weighted() else [1.0] * g.ecount())
+    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
     edges = np.array(g.get_edgelist(), dtype=int)
     src_com = communities[edges[:, 0]]
     trg_com = communities[edges[:, 1]]
@@ -354,7 +355,7 @@ def update_merge_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarra
     
     communities = np.array(communities_old)
     out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None))
-    weights = np.array(g.es["weight"] if g.is_weighted() else [1.0] * g.ecount())
+    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
     edges = np.array(g.get_edgelist(), dtype=int)
     src = edges[:, 0]
     trg = edges[:, 1]
@@ -436,7 +437,7 @@ def update_merge_description_length(g: ig.Graph, communities_old: list[int], p_o
             
     else:
         # For undirected, total_weight_x2 is constant
-        weights = np.array(g.es["weight"] if g.is_weighted() else [1.0] * g.ecount())
+        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
         total_weight_x2 = 2 * np.sum(weights)
         
         # Update exit weights
@@ -542,7 +543,7 @@ def update_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray, exi
 
     exit_flow = np.array(exit_flow_old, copy=True) # old exit flow
     # for flow computation we need the edge weights and outgoing strength
-    weights = np.array(g.es["weight"] if g.is_weighted() else [1.0] * g.ecount()) # network edge weights
+    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64)) # network edge weights
     out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None)) 
     
     node_out_strength = out_strength[node] # strength of outgoing links of moved node
@@ -649,7 +650,7 @@ def update_node_move_description_length(g: ig.Graph, communities_old: list[int],
             
     else:
         # For undirected, total_weight_x2 is constant
-        weights = np.array(g.es["weight"] if g.is_weighted() else [1.0] * g.ecount())
+        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
         total_weight_x2 = 2 * np.sum(weights)
         
         # Update exit weights
@@ -681,8 +682,8 @@ def update_node_move_description_length(g: ig.Graph, communities_old: list[int],
         - np.sum(safe_xlogx(p_old)) + np.sum(safe_xlogx(p_loop))    
     
 
-    if returnTerms:
-        return L, communities_new, exit_data
+    if returnTerms:     
+        return L, communities_new, p_mod_new, exit_data
 
     else:   
         return L
@@ -735,27 +736,28 @@ def node_movement_optimization(g, returnTerms=False, verbose=False):
             comms_to_test = np.unique(nb_comms) # get unique neighbor communities
             comms_to_test = comms_to_test[comms_to_test != src_comm] # remove node's own community from communities to test
             
-            L_best, communities_best, exits_data_best = L, communities, exit_data 
+            L_best, communities_best, exit_data_best = L, communities, exit_data 
             # go through unique neighbouring communities  
             for nbc in comms_to_test:
                 # get new description length for assigning node to different community
-                L_new, communities_new, exit_data_new = update_node_move_description_length(g, communities, p, p_mod, exit_data, n, nbc, returnTerms=True)
+                L_new, communities_new, p_mod_new, exit_data_new = update_node_move_description_length(g, communities, p, p_mod, exit_data, n, nbc, returnTerms=True)
                 if L_new is not None and L_new < L_best: # if better description length
                     # update best constellation
-                    L_best, communities_best, exits_data_best = L_new, communities_new, exit_data_new
+                    L_best, communities_best, p_mod_best, exit_data_best = L_new, communities_new, p_mod_new, exit_data_new
             
             # check if a change has been made
             if communities[n] == communities_best[n]: 
                 no_move_ctr += 1
 
             # take over the new best community partition & data (might be identical with old one)
-            L, communities, exit_data = L_best, communities_best, exits_data_best
+            L, communities, p_mod, exit_data = L_best, communities_best, p_mod_best, exit_data_best
         
         # only stop optimizing if not a single improving move has been made in the sequence
         # otherwise keep optimizing
         optimizable = no_move_ctr < N_nodes 
 
         if verbose:
+            print(f"Current best description length: {L_best}")
             print(f"Number of nodes that have been moved this iteration: {N_nodes-no_move_ctr}")
             if optimizable:
                 print("Continuing optimization.")
