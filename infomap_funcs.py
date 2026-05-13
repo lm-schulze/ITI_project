@@ -71,7 +71,7 @@ def visual_community_colors(g: ig.Graph, communities=None, skipLayout=False):
     """
     if communities is None and "community" in g.vertex_attributes():
         communities = g.vs["community"]
-    c = len(communities)
+    c = max(communities) + 1
     palette = ig.RainbowPalette(n=c)
 
     visual_style = {}
@@ -765,6 +765,7 @@ def node_movement_optimization(g, returnTerms=False, verbose=False):
                 print("Optimization finished!")
 
     if verbose:
+        print(f"Final number of communities: {len(np.unique(communities))}")
         print(f"Final description length: {L}")
 
     if returnTerms:
