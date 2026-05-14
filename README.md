@@ -8,3 +8,10 @@ Contributors:
   
 The project consists of the following files and folders (to be updated as the project progresses):
 - **filename**: file description.
+
+## Files in **_saviti_** branch
+
+- **`uniform.ipynb`** — map equation with uniform recorded teleportation (matches Laura's setup, sanity check)
+- **`nonuniform.ipynb`** — map equation with smart unrecorded teleportation (tutorial's recommended scheme)
+- **`summary.ipynb`** — quick-reference notebook showing the final results from both implementations side by side
+- **`map_equation.py`** — function definitions shared between the notebooks
