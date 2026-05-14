@@ -15,3 +15,4 @@ The project consists of the following files and folders (to be updated as the pr
 - **`nonuniform.ipynb`** — map equation with smart unrecorded teleportation (tutorial's recommended scheme)
 - **`summary.ipynb`** — quick-reference notebook showing the final results from both implementations side by side
 - **`map_equation.py`** — function definitions shared between the notebooks
+- **`bif.ipynb`** — first attempt at the implementation of a basic infomap function
