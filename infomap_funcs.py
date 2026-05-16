@@ -397,88 +397,83 @@ def update_merge_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarra
     return exit_flow_updated
 
 
-def update_merge_description_length(g: ig.Graph, communities_old: list[int], p_old: np.ndarray, p_mod_old: np.ndarray, exits_old: np.ndarray, comm1: int, comm2: int, tau: float = 0.15, returnTerms: bool = False, verbose: bool = False) -> float:
+def update_merge_description_length(g, communities_old, p_old, p_mod_old, exits_old, 
+                                     comm1, comm2, tau=0.15,
+                                     teleportation="uniform",
+                                     returnTerms=False, verbose=False):
     """Compute the change in description length if 2 communities are merged.
-        This can be used for search algorithms that iteratively merge communities to improve the partitioning.
 
     Args:
-        g (ig.Graph): input graph (can be directed or undirected, weighted or unweighted)
-        communities_old (list[int]): List of non-overlapping community labels for all nodes before the merge.
-        p_old (np.ndarray): The old node visit frequencies.
-        p_mod_old (np.ndarray): The old module visit frequencies.
-        exits_old (np.ndarray): The old exit flows/weights.
-        comm1 (int): The first community to be merged.
-        comm2 (int): The second community to be merged.
-        tau (float, optional): Teleportation probability for directed graphs. Defaults to 0.15.
-
-    Returns:
-        float: The new description length after merging the communities.
+        ... (existing args)
+        teleportation: "uniform" uses the incremental update (fast).
+            "nonuniform" falls back to a full recompute (slower but correct
+            for the smart unrecorded scheme — incremental updates would need
+            separate enter/exit flow tracking which isn't implemented).
     """
-
     if comm1 == comm2:
         raise ValueError("Cannot merge a community with itself")
-    
-    # Ensure comm1 < comm2
+
+    # Nonuniform: fall back to full recompute
+    if teleportation == "nonuniform":
+        communities_old = np.array(communities_old)
+        communities_new = np.where(communities_old != comm2, communities_old, comm1)
+        if returnTerms:
+            L, p_new, p_mod_new, exit_data = compute_description_length(
+                g, communities_new, tau=tau, teleportation="nonuniform",
+                returnTerms=True, verbose=verbose
+            )
+            return L, communities_new, p_new, p_mod_new, exit_data
+        else:
+            return compute_description_length(g, communities_new, tau=tau,
+                                              teleportation="nonuniform",
+                                              verbose=verbose)
+
+    # === Uniform path: existing incremental update ===
     if comm1 > comm2:
         comm1, comm2 = comm2, comm1
-    
+
     communities_old = np.array(communities_old)
     communities_new = np.where(communities_old != comm2, communities_old, comm1)
     num_communities = len(p_mod_old)
     N = g.vcount()
-    
-    # Update p_mod
+
     p_mod_new = p_mod_old.copy()
     p_mod_new[comm1] += p_mod_old[comm2]
     p_mod_new[comm2] = 0.0
-    
+
     if g.is_directed():
-        # Update node counts
         node_counts_old = np.bincount(communities_old, minlength=num_communities)
         node_counts_new = np.copy(node_counts_old)
         node_counts_new[comm2] = 0
         node_counts_new[comm1] += node_counts_old[comm2]
-        
-        # Update exit flows
+
         exit_flow_new = update_merge_exit_flow(g, communities_old, p_old, exits_old, comm1, comm2)
-        
-        # Compute q_mod
+
         q_mod = tau * (N - node_counts_new) / N * p_mod_new + (1 - tau) * exit_flow_new
-        
+
         if verbose:
             print("p sum:        ", p_old.sum())
             print("p_mod sum:    ", p_mod_new.sum())
             print("exit_flow sum:", exit_flow_new.sum())
             print("q_mod sum:    ", q_mod.sum())
-            print("any nan/inf:", np.any(~np.isfinite(q_mod)), np.any(~np.isfinite(p_old)))
-            
     else:
-        # For undirected, total_weight_x2 is constant
         weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
         total_weight_x2 = 2 * np.sum(weights)
-        
-        # Update exit weights
+
         exit_weights_new = update_merge_exit_weights(g, communities_old, exits_old, comm1, comm2)
-        
-        # Compute q_mod
         q_mod = exit_weights_new / total_weight_x2
 
-    q_sum = np.sum(q_mod) # total exit probability  
+    q_sum = np.sum(q_mod)
     p_loop = p_mod_new + q_mod
-        
-    # compute via map equation
-    L = safe_xlogx(q_sum) - 2*np.sum(safe_xlogx(q_mod)) \
-        - np.sum(safe_xlogx(p_old)) + np.sum(safe_xlogx(p_loop))    
-    
-    if g.is_directed():
-        exit_data = exit_flow_new
-    else:
-        exit_data = exit_weights_new
+
+    L = safe_xlogx(q_sum) - 2 * np.sum(safe_xlogx(q_mod)) \
+        - np.sum(safe_xlogx(p_old)) + np.sum(safe_xlogx(p_loop))
+
+    exit_data = exit_flow_new if g.is_directed() else exit_weights_new
 
     if returnTerms:
         return L, communities_new, p_old, p_mod_new, exit_data
-
-    else:   
+    else:
         return L
     
 
@@ -670,174 +665,139 @@ def compute_enter_flow_nonuniform(g: ig.Graph, communities: list[int], p: np.nda
     np.add.at(enter_flow, trg_com[betw], flow[betw])
     return enter_flow
 
-def update_node_move_description_length(g: ig.Graph, communities_old: list[int], p_old: np.ndarray, p_mod_old: np.ndarray, exits_old: np.ndarray, node: int, comm_trg: int, tau: float = 0.15, returnTerms: bool = False, verbose: bool = False) -> float:
-    """Compute the change in description length if a single node is moved from its community to a different community.
-        This can be used for search algorithms that iteratively move nodes between communities to improve the partitioning.
+def update_node_move_description_length(g, communities_old, p_old, p_mod_old, exits_old,
+                                         node, comm_trg, tau=0.15,
+                                         teleportation="uniform",
+                                         returnTerms=False, verbose=False):
+    """Compute the change in description length if a single node is moved.
 
     Args:
-        g (ig.Graph): input graph (can be directed or undirected, weighted or unweighted)
-        communities_old (list[int]): List of non-overlapping community labels for all nodes before the merge.
-        p_old (np.ndarray): The old node visit frequencies.
-        p_mod_old (np.ndarray): The old module visit frequencies.
-        exits_old (np.ndarray): The old exit flows/weights.
-        node (int): Node to be moved to a different community.
-        comm_trg (int): Target community to move the node to.
-        tau (float, optional): Teleportation probability for directed graphs. Defaults to 0.15.
-
-    Returns:
-        float: The new description length after moving the node.
+        ... (existing args)
+        teleportation: "uniform" uses the incremental update (fast).
+            "nonuniform" falls back to a full recompute (slower but correct).
     """
-
-    # get the community the original node belongs to
     comm_src = communities_old[node]
-    # if source community == target community: no change in description length.
     if comm_src == comm_trg:
-        warnings.warn(f"Node already in target community {comm_trg}! No change in description length.")
+        warnings.warn(f"Node already in target community {comm_trg}! No change.")
         if returnTerms:
-            return None, communities_old, exits_old 
+            return None, communities_old, exits_old
         else:
             return None
-    
+
+    # Nonuniform: fall back to full recompute
+    if teleportation == "nonuniform":
+        communities_old = np.array(communities_old)
+        communities_new = communities_old.copy()
+        communities_new[node] = comm_trg
+        if returnTerms:
+            L, p_new, p_mod_new, exit_data = compute_description_length(
+                g, communities_new, tau=tau, teleportation="nonuniform",
+                returnTerms=True, verbose=verbose
+            )
+            return L, communities_new, p_mod_new, exit_data
+        else:
+            return compute_description_length(g, communities_new, tau=tau,
+                                              teleportation="nonuniform",
+                                              verbose=verbose)
+
+    # === Uniform path: existing incremental update ===
     communities_old = np.array(communities_old)
     communities_new = communities_old.copy()
     communities_new[node] = comm_trg
-    
-    num_communities = len(p_mod_old) #  TODO: handle case of empty community later!
+
+    num_communities = len(p_mod_old)
     N = g.vcount()
-    
-    # Update p_mod
-    # subtract visit frequency p of node from source community
-    # and add it to target community
-    p_node = p_old[node] # get visit frequency of moved node
+
+    p_node = p_old[node]
     p_mod_new = p_mod_old.copy()
-    p_mod_new[comm_src] -= p_node  # subtract from source community
-    p_mod_new[comm_trg] += p_node  # add to target community
-    
+    p_mod_new[comm_src] -= p_node
+    p_mod_new[comm_trg] += p_node
+
     if g.is_directed():
-        # Update node counts
         node_counts = np.bincount(communities_new, minlength=num_communities)
-        
-        # Update exit flows
         exit_flow_new = update_exit_flow(g, communities_old, p_old, exits_old, node, comm_src, comm_trg)
-        
-        # Compute q_mod
         q_mod = tau * (N - node_counts) / N * p_mod_new + (1 - tau) * exit_flow_new
-            
     else:
-        # For undirected, total_weight_x2 is constant
         weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
         total_weight_x2 = 2 * np.sum(weights)
-        
-        # Update exit weights
-        exit_weights_new = update_exit_weights(g, communities_old, exits_old, node,
-                                               comm_src, comm_trg)
-        # Compute q_mod
+        exit_weights_new = update_exit_weights(g, communities_old, exits_old, node, comm_src, comm_trg)
         q_mod = exit_weights_new / total_weight_x2
 
-    q_sum = np.sum(q_mod) # total exit probability  
+    q_sum = np.sum(q_mod)
     p_loop = p_mod_new + q_mod
 
-    if g.is_directed():
-        exit_data = exit_flow_new
-    else:
-        exit_data = exit_weights_new
-
     if verbose:
-        # diagnostics:
         print("p sum:        ", p_old.sum())
-        print("p_mod sum:    ", p_mod_new.sum())       # should equal p.sum() = 1
-        print("exit_data sum:", exit_data.sum())   # should be < 1
-        print("q_mod sum:    ", q_mod.sum())       # should be < 1
-        print("p_loop sum:   ", p_loop.sum())      # should be > 1 (= 1 + q_sum)
-        print("any nan/inf:", np.any(~np.isfinite(q_mod)), np.any(~np.isfinite(p_old)))
-        
-        
-    # compute via map equation
-    L = safe_xlogx(q_sum) - 2*np.sum(safe_xlogx(q_mod)) \
-        - np.sum(safe_xlogx(p_old)) + np.sum(safe_xlogx(p_loop))    
-    
+        print("p_mod sum:    ", p_mod_new.sum())
+        print("q_mod sum:    ", q_mod.sum())
 
-    if returnTerms:     
+    L = safe_xlogx(q_sum) - 2 * np.sum(safe_xlogx(q_mod)) \
+        - np.sum(safe_xlogx(p_old)) + np.sum(safe_xlogx(p_loop))
+
+    exit_data = exit_flow_new if g.is_directed() else exit_weights_new
+
+    if returnTerms:
         return L, communities_new, p_mod_new, exit_data
-
-    else:   
+    else:
         return L
 
-
-def node_movement_optimization(g, returnTerms=False, verbose=False):
-    """Optimize community assignment of single nodes by sequentially iterating through them
-    in a random order and assigning them to the neighbouring community that yields the greatest
-    decrease in description length (or leaving them if current community yields lowest description length). 
-    Repeats until no further improving node moves are possible. Corresponds to Phase 1 of the optimization 
-    algorithm.
+def node_movement_optimization(g, teleportation="uniform", returnTerms=False, verbose=False):
+    """Phase 1 of the search algorithm. Iteratively moves each node to the
+    neighbouring community that minimizes L, until no further improvement.
 
     Args:
-        g (igraph.Graph): Input graph. Also supports directed and/or weighted graphs.
-        returnTerms (bool, optional): Whether to return additional information besides best community
-                                      assignment. Defaults to False.
-        verbose (bool, optional): Whether to print info for debugging. Defaults to False.
-
-    Returns:
-        list[int]: List of best community assignments found. If returnTerms is True, also returns 
-                   description length L and community exit flows/weights of current structure.
+        g: input graph
+        teleportation: "uniform" or "nonuniform" (default: uniform).
+            For nonuniform, the incremental updates fall back to full recompute,
+            making this much slower but still correct.
+        returnTerms: whether to also return L, p_mod, exit_data
+        verbose: print progress info
     """
-    nodes = g.vs.indices # get list of nodes
+    nodes = g.vs.indices
     N_nodes = g.vcount()
-    neighborhood = g.neighborhood(mindist=1) # get list of neighbours for all nodes
-    #neighborhood = [np.array(nbs) for nbs in neighborhood] # convert to list of numpy arrays for easier indexing
+    neighborhood = g.neighborhood(mindist=1)
 
-    # initialize community partition with each node being its own community
-    communities = np.arange(N_nodes) # start with each node assigned to its own community
+    communities = np.arange(N_nodes)
 
-    # compute description length including some intermediate terms:
-    L, p, p_mod, exit_data = compute_description_length(g, communities, returnTerms=True)
+    L, p, p_mod, exit_data = compute_description_length(
+        g, communities, teleportation=teleportation, returnTerms=True
+    )
 
     if verbose:
         print(f"Starting from description length: {L}")
 
-    optimizable=True
-    while optimizable: # while there are still improvements via node moves:
-        # randomize node sequence
+    optimizable = True
+    while optimizable:
         random.shuffle(nodes)
-
-        # track how many nodes remain in their og community
         no_move_ctr = 0
 
-        # for each node go through neighbours (if different community(?))
         for n in nodes:
-            neighbors = neighborhood[n] # get neighbors of node
-            nb_comms = communities[neighbors] # get communties of neighbors
-            src_comm = communities[n] # community the current node is in
-            comms_to_test = np.unique(nb_comms) # get unique neighbor communities
-            comms_to_test = comms_to_test[comms_to_test != src_comm] # remove node's own community from communities to test
-            
-            L_best, communities_best, p_mod_best, exit_data_best = L, communities, p_mod, exit_data 
-            # go through unique neighbouring communities  
+            neighbors = neighborhood[n]
+            nb_comms = communities[neighbors]
+            src_comm = communities[n]
+            comms_to_test = np.unique(nb_comms)
+            comms_to_test = comms_to_test[comms_to_test != src_comm]
+
+            L_best, communities_best, p_mod_best, exit_data_best = L, communities, p_mod, exit_data
+
             for nbc in comms_to_test:
-                # get new description length for assigning node to different community
-                L_new, communities_new, p_mod_new, exit_data_new = update_node_move_description_length(g, communities, p, p_mod, exit_data, n, nbc, returnTerms=True)
-                if L_new is not None and L_new < L_best: # if better description length
-                    # update best constellation
+                L_new, communities_new, p_mod_new, exit_data_new = update_node_move_description_length(
+                    g, communities, p, p_mod, exit_data, n, nbc,
+                    teleportation=teleportation, returnTerms=True
+                )
+                if L_new is not None and L_new < L_best:
                     L_best, communities_best, p_mod_best, exit_data_best = L_new, communities_new, p_mod_new, exit_data_new
-            
-            # check if a change has been made
-            if communities[n] == communities_best[n]: 
+
+            if communities[n] == communities_best[n]:
                 no_move_ctr += 1
 
-            # take over the new best community partition & data (might be identical with old one)
             L, communities, p_mod, exit_data = L_best, communities_best, p_mod_best, exit_data_best
-        
-        # only stop optimizing if not a single improving move has been made in the sequence
-        # otherwise keep optimizing
-        optimizable = no_move_ctr < N_nodes 
+
+        optimizable = no_move_ctr < N_nodes
 
         if verbose:
-            print(f"Current best description length: {L_best}")
-            print(f"Number of nodes that have been moved this iteration: {N_nodes-no_move_ctr}")
-            if optimizable:
-                print("Continuing optimization.")
-            else: 
-                print("Optimization finished!")
+            print(f"Current best description length: {L}")
+            print(f"Number of nodes moved this iteration: {N_nodes - no_move_ctr}")
 
     if verbose:
         print(f"Final number of communities: {len(np.unique(communities))}")
