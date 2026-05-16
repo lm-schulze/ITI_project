@@ -209,81 +209,98 @@ def pagerank(M, tau: float = 0.15, tol: float = 1e-15, maxiter: int = 1e6):
     return p
 
 
-def compute_description_length(g: ig.Graph, communities: list[int], tau: float = 0.15, returnTerms: bool = False, verbose: bool = False) -> float :
-    """Compute the description length of a given partitioning of the graph using the map equation.
-        Supports both directed and undirected graphs.
-
+def compute_description_length(g, communities, tau=0.15, 
+                               teleportation="uniform",
+                               returnTerms=False, verbose=False):
+    """Compute the description length of a partition using the map equation.
+    
     Args:
-        g (ig.Graph): input graph (can be directed or undirected, weighted or unweighted)
-        communities (list[int]): List of non-overlapping community labels for all nodes of input graph G.
-        tau (float, optional): Teleportation probability for directed graphs. Defaults to 0.15.
-        returnTerms (bool, optional): Whether to return additional terms that may be useful for updating later.
-        verbose (bool, optional): Whether to print diagnostic information for debugging. Defaults to False.
-
-    Returns:
-        float: Description length of the given partitioning of the graph according to the map equation.
-        or i returnTerms=True, additionally returns the p, p_mod, exit_flow/weights
-
+        g: input graph (directed/undirected, weighted/unweighted)
+        communities: community label for each node
+        tau: teleportation probability (only matters for directed graphs)
+        teleportation: "uniform" (recorded) or "nonuniform" (smart unrecorded).
+            For undirected graphs, this flag is ignored — teleportation has
+            no effect on undirected results.
+        returnTerms: also return intermediate terms (p, p_mod, exit_data)
+        verbose: print diagnostic info
     """
-
-    num_communities = max(communities) + 1 # number of communities in the partition
-    N = g.vcount() # number of nodes in the graph
+    if teleportation not in ("uniform", "nonuniform"):
+        raise ValueError(f"teleportation must be 'uniform' or 'nonuniform', got {teleportation!r}")
+    
+    communities = np.array(communities)
+    num_communities = max(communities) + 1
+    N = g.vcount()
     
     if g.is_directed():
-        # get adjacency matrix
-        adj = np.array(g.get_adjacency(attribute="weight" if g.is_weighted() else None).data)
-        # compute node visit frequencies with teleportation
-        p = pagerank(adj, tau=tau)
-        # compute module visit frequencies
-        p_mod = np.zeros(num_communities)
-        np.add.at(p_mod, communities, p) # sum node visit frequencies for each community
-        # compute module exit probabilities (flow leaving modules due to inter-community edges)
-        exit_flow = compute_exit_flow(g, communities, p)
-
-        # compute module exit probabilities with teleportation correction:
-        q_mod = tau * (N-np.bincount(communities, minlength=num_communities)) / N * p_mod \
-            + (1-tau) * exit_flow
+        adj = np.array(g.get_adjacency(attribute="weight" if g.is_weighted() else None).data, dtype=float)
+        
+        if teleportation == "uniform":
+            # === Uniform recorded teleportation ===
+            p = pagerank(adj, tau=tau)
+            p_mod = np.zeros(num_communities)
+            np.add.at(p_mod, communities, p)
+            exit_flow = compute_exit_flow(g, communities, p)
             
-    else:
-        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
-        total_weight_x2 = 2 * np.sum(weights) # total weight of all edges (x2 for undirected graphs)
-
-        # compute ergodic node visit frequencies
-        p = np.array(g.strength(weights="weight" if g.is_weighted() else None)) / total_weight_x2
+            # q_mod includes the teleportation term
+            n_mod = np.bincount(communities, minlength=num_communities)
+            q_mod = tau * (N - n_mod) / N * p_mod + (1 - tau) * exit_flow
+            
+            # symmetric formula (same q for index and module codebook)
+            q_sum = np.sum(q_mod)
+            p_loop = p_mod + q_mod
+            L = safe_xlogx(q_sum) - 2 * np.sum(safe_xlogx(q_mod)) \
+                - np.sum(safe_xlogx(p)) + np.sum(safe_xlogx(p_loop))
+            exit_data = exit_flow
+            
+        else:  # nonuniform
+            # === Smart unrecorded teleportation ===
+            p = pagerank_nonuniform(adj, tau=tau)
+            p_mod = np.zeros(num_communities)
+            np.add.at(p_mod, communities, p)
+            exit_flow = compute_exit_flow(g, communities, p)
+            enter_flow = compute_enter_flow_nonuniform(g, communities, p)
+            
+            # asymmetric formula: enter for index, exit for module
+            q_enter = enter_flow
+            q_exit = exit_flow
+            q_enter_sum = np.sum(q_enter)
+            p_loop = p_mod + q_exit
+            L = safe_xlogx(q_enter_sum) - np.sum(safe_xlogx(q_enter)) \
+                - np.sum(safe_xlogx(q_exit)) \
+                - np.sum(safe_xlogx(p)) + np.sum(safe_xlogx(p_loop))
+            exit_data = exit_flow
+            q_mod = exit_flow   # for returnTerms/verbose compatibility
     
-        p_mod = np.zeros(max(communities) + 1)
-        np.add.at(p_mod, communities, p) # sum node visit frequencies for each community
-        
-        # compute module exit probabilities
-        exit_weights = compute_exit_weights(g, communities) 
-        q_mod = exit_weights / total_weight_x2
-
-    q_sum = np.sum(q_mod) # total exit probability  
-    p_loop = p_mod + q_mod
-
-    if g.is_directed():
-        exit_data = exit_flow
     else:
-        exit_data = exit_weights
-
-    if verbose:
-        # diagnostics:
-        print("p sum:        ", p.sum())
-        print("p_mod sum:    ", p_mod.sum())       # should equal p.sum() = 1
-        print("exit_data sum:", exit_data.sum())   # should be < 1
-        print("q_mod sum:    ", q_mod.sum())       # should be < 1
-        print("p_loop sum:   ", p_loop.sum())      # should be > 1 (= 1 + q_sum)
-        print("any nan/inf:", np.any(~np.isfinite(q_mod)), np.any(~np.isfinite(p)))
+        # === Undirected case — same for both teleportation schemes ===
+        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
+        total_weight_x2 = 2 * np.sum(weights)
+        p = np.array(g.strength(weights="weight" if g.is_weighted() else None)) / total_weight_x2
         
-    # compute via map equation
-    L = safe_xlogx(q_sum) - 2*np.sum(safe_xlogx(q_mod)) \
-        - np.sum(safe_xlogx(p)) + np.sum(safe_xlogx(p_loop))    
-
+        p_mod = np.zeros(num_communities)
+        np.add.at(p_mod, communities, p)
+        
+        exit_weights = compute_exit_weights(g, communities)
+        q_mod = exit_weights / total_weight_x2
+        
+        q_sum = np.sum(q_mod)
+        p_loop = p_mod + q_mod
+        L = safe_xlogx(q_sum) - 2 * np.sum(safe_xlogx(q_mod)) \
+            - np.sum(safe_xlogx(p)) + np.sum(safe_xlogx(p_loop))
+        exit_data = exit_weights
+    
+    if verbose:
+        print(f"teleportation: {teleportation}")
+        print("p sum:        ", p.sum())
+        print("p_mod sum:    ", p_mod.sum())
+        print("exit_data sum:", exit_data.sum())
+        print("q_mod sum:    ", q_mod.sum())
+        print("p_loop sum:   ", p_loop.sum())
+    
     if returnTerms:
         return L, p, p_mod, exit_data
-    else:   
+    else:
         return L
-
 
 def update_merge_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_old: list[int], comm1: int, comm2:int ) -> np.ndarray:
     """ Compute the change in exit weights & update if 2 communities are merged.
@@ -594,6 +611,64 @@ def update_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray, exi
             exit_flow[comm_trg] -= np.sum(flow_in[mask_trg])
 
     return exit_flow
+
+
+
+def pagerank_nonuniform(M, tau: float = 0.15, tol: float = 1e-15, maxiter: int = 1e6):
+    """Two-step PageRank for smart unrecorded teleportation (tutorial Eq. 4-6).
+    
+    Step 1: solve for p* with teleportation proportional to out-strength.
+    Step 2: take one extra link-only step to get the recorded visit rates p.
+    
+    Nodes with no incoming edges are zeroed out (they can only be reached
+    via teleportation, which is unrecorded in this scheme).
+    """
+    N = M.shape[0]
+    row_sums = M.sum(axis=1)
+    col_sums = M.sum(axis=0)
+    dangling = (row_sums == 0)
+    no_incoming = (col_sums == 0)
+    row_sums_safe = np.where(dangling, 1, row_sums)
+    M_norm = M / row_sums_safe[:, None]
+
+    total_out = row_sums.sum()
+    d = row_sums / total_out if total_out > 0 else np.ones(N) / N
+
+    # Step 1
+    p_star = np.ones(N) / N
+    for _ in range(int(maxiter)):
+        dangling_sum = p_star[dangling].sum()
+        p_star_new = (1 - tau) * (p_star @ M_norm + dangling_sum * d) + tau * d
+        if np.linalg.norm(p_star_new - p_star) < tol:
+            p_star = p_star_new
+            break
+        p_star = p_star_new
+
+    # Step 2: link-only step + dangling redistribution
+    dangling_sum = p_star[dangling].sum()
+    p = p_star @ M_norm + dangling_sum * d
+    p[no_incoming] = 0
+    p = p / p.sum()
+    return p
+
+
+def compute_enter_flow_nonuniform(g: ig.Graph, communities: list[int], p: np.ndarray) -> np.ndarray:
+    """Rate of flow entering each community via incoming edges from outside."""
+    communities = np.array(communities)
+    out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None))
+    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
+    edges = np.array(g.get_edgelist(), dtype=int)
+
+    src, trg = edges[:, 0], edges[:, 1]
+    src_com, trg_com = communities[src], communities[trg]
+    betw = src_com != trg_com
+
+    out_str_safe = np.where(out_strength > 0, out_strength, 1.0)
+    flow = p[src] * weights / out_str_safe[src]
+
+    enter_flow = np.zeros(max(communities) + 1)
+    np.add.at(enter_flow, trg_com[betw], flow[betw])
+    return enter_flow
 
 def update_node_move_description_length(g: ig.Graph, communities_old: list[int], p_old: np.ndarray, p_mod_old: np.ndarray, exits_old: np.ndarray, node: int, comm_trg: int, tau: float = 0.15, returnTerms: bool = False, verbose: bool = False) -> float:
     """Compute the change in description length if a single node is moved from its community to a different community.
