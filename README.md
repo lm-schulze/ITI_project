@@ -7,4 +7,8 @@ Contributors:
 - Savina Tsichli ([@savinats](https://github.com/savinats))
   
 The project consists of the following files and folders (to be updated as the project progresses):
-- **filename**: file description.
+- **test_graphs/**: folder containing test graphs exported as GraphML, (weighted/unweighted, directed/undirected); as well as visualizations of each graph as .pdf
+- `infomap_funcs.py`: Contains all helper functions used to generate & visualise test networks, compute & update description length, and perform the search for an optimal community partition.
+- `Test_networks.ipynb`: Jupyter notebook containing the SBM-based graph generation function used to generate the test graphs. Uses the igraph library.
+- `Test_infomap.ipynb`: Jupyter notebook testing a self-implemented version of the Infomap description length computation via map equation, as well as custom update functions. Uses the igraph library.
+- `SearchAlgorithm.ipynb`: Jupyter notebook for testing the functions needed for implementing the search algorithm to find the optimal community partition wrt. description length. Uses the igraph library.
