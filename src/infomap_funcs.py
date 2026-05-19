@@ -228,6 +228,14 @@ def compute_description_length(g: ig.Graph, communities: list[int], tau: float =
 
     num_communities = max(communities) + 1 # number of communities in the partition
     N = g.vcount() # number of nodes in the graph
+
+    # handle the edge-case (hehe) of a graph without edges:
+    if g.ecount() == 0: # graph doesn't have edges
+        # no flows, everything is 0, description length is infinite?
+        if returnTerms:
+            return np.inf, 0, 0, 0
+        else:   
+            return np.inf
     
     if g.is_directed():
         # get adjacency matrix
@@ -689,7 +697,7 @@ def update_node_move_description_length(g: ig.Graph, communities_old: list[int],
         return L
 
 
-def node_movement_optimization(g, returnTerms=False, verbose=False):
+def node_movement_optimization(g, initial_communities=None, returnTerms=False, verbose=False):
     """Optimize community assignment of single nodes by sequentially iterating through them
     in a random order and assigning them to the neighbouring community that yields the greatest
     decrease in description length (or leaving them if current community yields lowest description length). 
@@ -698,8 +706,10 @@ def node_movement_optimization(g, returnTerms=False, verbose=False):
 
     Args:
         g (igraph.Graph): Input graph. Also supports directed and/or weighted graphs.
+        initial_communities(list[int], optional): Initial community assignment to start the optimization 
+                    from. If None, optimization starts with each node assigned to its own community.   
         returnTerms (bool, optional): Whether to return additional information besides best community
-                                      assignment. Defaults to False.
+                    assignment. Defaults to False.
         verbose (bool, optional): Whether to print info for debugging. Defaults to False.
 
     Returns:
@@ -712,7 +722,10 @@ def node_movement_optimization(g, returnTerms=False, verbose=False):
     #neighborhood = [np.array(nbs) for nbs in neighborhood] # convert to list of numpy arrays for easier indexing
 
     # initialize community partition with each node being its own community
-    communities = np.arange(N_nodes) # start with each node assigned to its own community
+    if initial_communities is None:
+        communities = np.arange(N_nodes) # start with each node assigned to its own community
+    else: 
+        communities = initial_communities.copy()
 
     # compute description length including some intermediate terms:
     L, p, p_mod, exit_data = compute_description_length(g, communities, returnTerms=True)
