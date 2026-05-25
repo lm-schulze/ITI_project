@@ -229,8 +229,8 @@ def compute_description_length(g: ig.Graph, communities: list[int], tau: float =
     num_communities = max(communities) + 1 # number of communities in the partition
     N = g.vcount() # number of nodes in the graph
 
-    # handle the edge-case (hehe) of a graph without edges:
-    if g.ecount() == 0: # graph doesn't have edges
+    # handle the edge-case (hehe) of a graph without edges, or nodes:
+    if g.ecount() == 0 or N == 0: # graph doesn't have edges or nodes:
         # no flows, everything is 0, description length is infinite?
         if returnTerms:
             return np.inf, 0, 0, 0
