@@ -226,16 +226,17 @@ def compute_description_length(g: ig.Graph, communities: list[int], tau: float =
 
     """
 
-    num_communities = max(communities) + 1 # number of communities in the partition
+    communities = np.array(communities, dtype=int)
+    num_communities = max(communities) + 1
+    # number of communities in the partition
     N = g.vcount() # number of nodes in the graph
 
     # handle the edge-case (hehe) of a graph without edges, or nodes:
     if g.ecount() == 0 or N == 0: # graph doesn't have edges or nodes:
-        # no flows, everything is 0, description length is infinite?
         if returnTerms:
-            return np.inf, 0, 0, 0
+            return 0.0, np.zeros(N), np.zeros(num_communities), np.zeros(num_communities)
         else:   
-            return np.inf
+            return 0.0
     
     if g.is_directed():
         # get adjacency matrix
@@ -259,7 +260,7 @@ def compute_description_length(g: ig.Graph, communities: list[int], tau: float =
         # compute ergodic node visit frequencies
         p = np.array(g.strength(weights="weight" if g.is_weighted() else None)) / total_weight_x2
     
-        p_mod = np.zeros(max(communities) + 1)
+        p_mod = np.zeros(num_communities) # initialise module visit frequency array
         np.add.at(p_mod, communities, p) # sum node visit frequencies for each community
         
         # compute module exit probabilities
@@ -289,186 +290,6 @@ def compute_description_length(g: ig.Graph, communities: list[int], tau: float =
 
     if returnTerms:
         return L, p, p_mod, exit_data
-    else:   
-        return L
-
-
-def update_merge_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_old: list[int], comm1: int, comm2:int ) -> np.ndarray:
-    """ Compute the change in exit weights & update if 2 communities are merged.
-        This can be used for search algorithms that iteratively merge communities to improve the partitioning.
-
-
-    Args:
-        g (ig.Graph): (Undirected) input graph.
-        communities_old (list[int]): List of non-overlapping community labels for all nodes of input graph G.
-        comm1 (int): First community to merge.
-        comm2 (int): Second community to merge.
-        exit_weights_old (list[int]): Exit weights before merging.
-
-    Returns:
-        np.ndarray: Exit weights for each community after merging.
-    """
-    
-    if comm1 == comm2:
-        raise ValueError("Cannot merge a community with itself")
-    
-    # Ensure comm1 < comm2
-    if comm1 > comm2:
-        comm1, comm2 = comm2, comm1
-    
-    communities = np.array(communities_old)
-    exit_weights_old = np.array(exit_weights_old)
-    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
-    edges = np.array(g.get_edgelist(), dtype=int)
-    src_com = communities[edges[:, 0]]
-    trg_com = communities[edges[:, 1]]
-    
-    # Edges between comm1 and comm2
-    betw_12 = ((src_com == comm1) & (trg_com == comm2)) | ((src_com == comm2) & (trg_com == comm1))
-    inter_weight = np.sum(weights[betw_12])
-    
-    # New exit weight for merged community
-    new_exit_merged = exit_weights_old[comm1] + exit_weights_old[comm2] - 2 * inter_weight
-    
-    # Create new exit weights array, set comm2 to 0
-    exit_weights_updated = exit_weights_old.copy()  
-    exit_weights_updated[comm1] = new_exit_merged
-    exit_weights_updated[comm2] = 0.0   # mark as empty; array length and all other indices unchanged
-    
-    return exit_weights_updated
-
-# it's a bit funkier when we're dealing with directed networks:
-def update_merge_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray, exit_flow_old: np.ndarray, comm1: int, comm2: int) -> np.ndarray:
-    """Compute the change in community exit flow if 2 communities are merged.
-    This can be used for search algorithms that iteratively merge communities to improve the partitioning.
-
-    Args:
-        g (ig.Graph): (Directed) input graph.
-        communities_old (list[int]): List of non-overlapping community labels for all nodes before merging.
-        p (np.ndarray): Node visit frequencies.
-        exit_flow_old (np.ndarray): Exit flows before merging.
-        comm1 (int): First community to merge.
-        comm2 (int): Second community to merge.
-
-    Returns:
-        np.ndarray: Exit flow for each community after merging.
-    """
-    
-    if comm1 == comm2:
-        raise ValueError("Cannot merge a community with itself")
-    
-    # Ensure comm1 < comm2
-    if comm1 > comm2:
-        comm1, comm2 = comm2, comm1
-    
-    communities = np.array(communities_old)
-    out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None))
-    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
-    edges = np.array(g.get_edgelist(), dtype=int)
-    src = edges[:, 0]
-    trg = edges[:, 1]
-    src_com = communities[src]
-    trg_com = communities[trg]
-    
-    # Edges between comm1 and comm2
-    betw_12 = ((src_com == comm1) & (trg_com == comm2)) | ((src_com == comm2) & (trg_com == comm1))
-    
-    # Flow on those edges (only from src), while handling out_strength 0 case
-    flow_inter = np.where(out_strength[src[betw_12]] > 0, p[src[betw_12]] * weights[betw_12] / out_strength[src[betw_12]], 0.0)  # dangling → 0 flow
-    inter_flow_sum = np.sum(flow_inter)
-    
-    # New exit flow for merged community
-    new_exit_merged = exit_flow_old[comm1] + exit_flow_old[comm2] - inter_flow_sum
-    
-    # Create new exit flow array, remove comm2 and shift
-    exit_flow_updated = exit_flow_old.copy()
-    exit_flow_updated[comm1] = new_exit_merged
-    exit_flow_updated[comm2] = 0.0
-    
-    return exit_flow_updated
-
-
-def update_merge_description_length(g: ig.Graph, communities_old: list[int], p_old: np.ndarray, p_mod_old: np.ndarray, exits_old: np.ndarray, comm1: int, comm2: int, tau: float = 0.15, returnTerms: bool = False, verbose: bool = False) -> float:
-    """Compute the change in description length if 2 communities are merged.
-        This can be used for search algorithms that iteratively merge communities to improve the partitioning.
-
-    Args:
-        g (ig.Graph): input graph (can be directed or undirected, weighted or unweighted)
-        communities_old (list[int]): List of non-overlapping community labels for all nodes before the merge.
-        p_old (np.ndarray): The old node visit frequencies.
-        p_mod_old (np.ndarray): The old module visit frequencies.
-        exits_old (np.ndarray): The old exit flows/weights.
-        comm1 (int): The first community to be merged.
-        comm2 (int): The second community to be merged.
-        tau (float, optional): Teleportation probability for directed graphs. Defaults to 0.15.
-
-    Returns:
-        float: The new description length after merging the communities.
-    """
-
-    if comm1 == comm2:
-        raise ValueError("Cannot merge a community with itself")
-    
-    # Ensure comm1 < comm2
-    if comm1 > comm2:
-        comm1, comm2 = comm2, comm1
-    
-    communities_old = np.array(communities_old)
-    communities_new = np.where(communities_old != comm2, communities_old, comm1)
-    num_communities = len(p_mod_old)
-    N = g.vcount()
-    
-    # Update p_mod
-    p_mod_new = p_mod_old.copy()
-    p_mod_new[comm1] += p_mod_old[comm2]
-    p_mod_new[comm2] = 0.0
-    
-    if g.is_directed():
-        # Update node counts
-        node_counts_old = np.bincount(communities_old, minlength=num_communities)
-        node_counts_new = np.copy(node_counts_old)
-        node_counts_new[comm2] = 0
-        node_counts_new[comm1] += node_counts_old[comm2]
-        
-        # Update exit flows
-        exit_flow_new = update_merge_exit_flow(g, communities_old, p_old, exits_old, comm1, comm2)
-        
-        # Compute q_mod
-        q_mod = tau * (N - node_counts_new) / N * p_mod_new + (1 - tau) * exit_flow_new
-        
-        if verbose:
-            print("p sum:        ", p_old.sum())
-            print("p_mod sum:    ", p_mod_new.sum())
-            print("exit_flow sum:", exit_flow_new.sum())
-            print("q_mod sum:    ", q_mod.sum())
-            print("any nan/inf:", np.any(~np.isfinite(q_mod)), np.any(~np.isfinite(p_old)))
-            
-    else:
-        # For undirected, total_weight_x2 is constant
-        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
-        total_weight_x2 = 2 * np.sum(weights)
-        
-        # Update exit weights
-        exit_weights_new = update_merge_exit_weights(g, communities_old, exits_old, comm1, comm2)
-        
-        # Compute q_mod
-        q_mod = exit_weights_new / total_weight_x2
-
-    q_sum = np.sum(q_mod) # total exit probability  
-    p_loop = p_mod_new + q_mod
-        
-    # compute via map equation
-    L = safe_xlogx(q_sum) - 2*np.sum(safe_xlogx(q_mod)) \
-        - np.sum(safe_xlogx(p_old)) + np.sum(safe_xlogx(p_loop))    
-    
-    if g.is_directed():
-        exit_data = exit_flow_new
-    else:
-        exit_data = exit_weights_new
-
-    if returnTerms:
-        return L, communities_new, p_old, p_mod_new, exit_data
-
     else:   
         return L
     
@@ -620,9 +441,11 @@ def update_node_move_description_length(g: ig.Graph, communities_old: list[int],
     Returns:
         float: The new description length after moving the node.
     """
-
+    
     # get the community the original node belongs to
     comm_src = communities_old[node]
+    if verbose: 
+        print(f"Moving node {node} from community {comm_src} to {comm_trg}")
     # if source community == target community: no change in description length.
     if comm_src == comm_trg:
         warnings.warn(f"Node already in target community {comm_trg}! No change in description length.")
@@ -635,14 +458,31 @@ def update_node_move_description_length(g: ig.Graph, communities_old: list[int],
     communities_new = communities_old.copy()
     communities_new[node] = comm_trg
     
-    num_communities = len(p_mod_old) #  TODO: handle case of empty community later!
+    num_communities = len(np.unique(communities_new)) #  TODO: handle case of empty community later!
     N = g.vcount()
     
     # Update p_mod
     # subtract visit frequency p of node from source community
     # and add it to target community
     p_node = p_old[node] # get visit frequency of moved node
-    p_mod_new = p_mod_old.copy()
+
+    if comm_trg not in communities_old: # we're
+        needed_size = comm_trg + 1  # comm_trg might be a new singleton label
+    else: 
+        needed_size = num_communities # otherwise we just need to make sure we have enough space for the existing communities
+    
+    if needed_size > len(p_mod_old):
+        p_mod_new = np.zeros(needed_size)
+        p_mod_new[:len(p_mod_old)] = p_mod_old
+    else:
+        p_mod_new = p_mod_old.copy()
+
+    if needed_size > len(exits_old):
+        exits_new = np.zeros(needed_size)
+        exits_new[:len(exits_old)] = exits_old
+    else:
+        exits_new = exits_old.copy()
+
     p_mod_new[comm_src] -= p_node  # subtract from source community
     p_mod_new[comm_trg] += p_node  # add to target community
     
@@ -651,7 +491,7 @@ def update_node_move_description_length(g: ig.Graph, communities_old: list[int],
         node_counts = np.bincount(communities_new, minlength=num_communities)
         
         # Update exit flows
-        exit_flow_new = update_exit_flow(g, communities_old, p_old, exits_old, node, comm_src, comm_trg)
+        exit_flow_new = update_exit_flow(g, communities_old, p_old, exits_new, node, comm_src, comm_trg)
         
         # Compute q_mod
         q_mod = tau * (N - node_counts) / N * p_mod_new + (1 - tau) * exit_flow_new
@@ -662,7 +502,7 @@ def update_node_move_description_length(g: ig.Graph, communities_old: list[int],
         total_weight_x2 = 2 * np.sum(weights)
         
         # Update exit weights
-        exit_weights_new = update_exit_weights(g, communities_old, exits_old, node,
+        exit_weights_new = update_exit_weights(g, communities_old, exits_new, node,
                                                comm_src, comm_trg)
         # Compute q_mod
         q_mod = exit_weights_new / total_weight_x2
@@ -748,23 +588,30 @@ def node_movement_optimization(g, initial_communities=None, returnTerms=False, v
             src_comm = communities[n] # community the current node is in
             comms_to_test = np.unique(nb_comms) # get unique neighbor communities
             comms_to_test = comms_to_test[comms_to_test != src_comm] # remove node's own community from communities to test
-            
-            L_best, communities_best, p_mod_best, exit_data_best = L, communities, p_mod, exit_data 
+             # also give the option of moving to a new singleton community.
+            fresh_singleton = int(np.max(communities) + 1)  # guaranteed unused label
+            comms_to_test = np.append(comms_to_test, fresh_singleton)   
+
+            L_best, communities_best, p_mod_best, exit_data_best = L, communities.copy(), p_mod.copy(), exit_data.copy() 
             # go through unique neighbouring communities  
             for nbc in comms_to_test:
                 # get new description length for assigning node to different community
-                L_new, communities_new, p_mod_new, exit_data_new = update_node_move_description_length(g, communities, p, p_mod, exit_data, n, nbc, returnTerms=True)
+                L_new, communities_new, p_mod_new, exit_data_new = update_node_move_description_length(g, communities, p, p_mod, exit_data, n, nbc, returnTerms=True, verbose=verbose)
                 if L_new is not None and L_new < L_best: # if better description length
                     # update best constellation
-                    L_best, communities_best, p_mod_best, exit_data_best = L_new, communities_new, p_mod_new, exit_data_new
+                    L_best, communities_best, p_mod_best, exit_data_best = L_new, communities_new.copy(), p_mod_new.copy(), exit_data_new.copy()
             
             # check if a change has been made
             if communities[n] == communities_best[n]: 
                 no_move_ctr += 1
 
             # take over the new best community partition & data (might be identical with old one)
-            L, communities, p_mod, exit_data = L_best, communities_best, p_mod_best, exit_data_best
-        
+            L, communities, p_mod, exit_data = L_best, communities_best.copy(), p_mod_best.copy(), exit_data_best.copy()
+
+            # relabel to contiguous, 0-indexed labels
+            _, communities = np.unique(communities, return_inverse=True)
+            L, p, p_mod, exit_data = compute_description_length(
+                g, communities, returnTerms=True)
         # only stop optimizing if not a single improving move has been made in the sequence
         # otherwise keep optimizing
         optimizable = no_move_ctr < N_nodes 
@@ -776,6 +623,12 @@ def node_movement_optimization(g, initial_communities=None, returnTerms=False, v
                 print("Continuing optimization.")
             else: 
                 print("Optimization finished!")
+
+    # relabel to obtain contiguous community labels
+    _, communities = np.unique(communities, return_inverse=True)
+    L, p, p_mod, exit_data = compute_description_length(
+            g, communities, returnTerms=True
+        )
 
     if verbose:
         print(f"Final number of communities: {len(np.unique(communities))}")
