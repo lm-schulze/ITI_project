@@ -311,6 +311,8 @@ def compute_description_length(g, communities, tau=0.15,
         return L, p, p_mod, exit_data
     else:
         return L
+    
+'''
 
 def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_old: np.ndarray,
                            node: int, comm_src: int, comm_trg: int) -> np.ndarray:
@@ -366,6 +368,59 @@ def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_ol
     exit_weights_new[comm_src] += delta_src
     exit_weights_new[comm_trg] += delta_trg
     
+    return exit_weights_new
+
+'''
+
+def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_old: np.ndarray,
+                        node: int, comm_src: int, comm_trg: int) -> np.ndarray:
+    """Update exit weights incrementally when a single node moves communities.
+    Self-loops are explicitly excluded: they never cross community boundaries
+    and must not contribute to exit-weight deltas. (The old code used
+    g.strength(), which counts self-loop weights twice for undirected graphs,
+    causing delta_trg to be overestimated by 2 * self-loop-weight and therefore
+    causing beneficial node moves to be spuriously rejected on compressed graphs.)
+    """
+    communities = np.array(communities_old)
+    if communities[node] != comm_src:
+        raise ValueError(f"Node {node} is not in source community {comm_src}")
+    if comm_src == comm_trg:
+        return exit_weights_old.copy()
+
+    incident_eids = np.array(g.incident(node), dtype=int)
+    all_edges     = np.array(g.get_edgelist(), dtype=int)
+    all_weights   = np.array(
+        g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64)
+    )
+
+    inc_edges   = all_edges[incident_eids]
+    inc_weights = all_weights[incident_eids]
+
+    neighbor_nodes = np.where(inc_edges[:, 0] == node, inc_edges[:, 1], inc_edges[:, 0])
+
+    # ── KEY FIX ────────────────────────────────────────────────────────────────
+    # Discard self-loops: they are always intra-community and never affect exit
+    # weights regardless of which community the node is in.
+    # Using g.strength() is wrong here because igraph counts self-loop weight
+    # *twice* for undirected graphs, while g.incident() returns the self-loop
+    # edge only once — the asymmetry corrupts delta_trg.
+    not_self    = neighbor_nodes != node
+    neighbor_nodes = neighbor_nodes[not_self]
+    inc_weights    = inc_weights[not_self]
+    # ───────────────────────────────────────────────────────────────────────────
+
+    neighbor_comms = communities[neighbor_nodes]
+    total_degree   = np.sum(inc_weights)          # non-self-loop degree only
+
+    W_src = np.sum(inc_weights[neighbor_comms == comm_src])
+    W_trg = np.sum(inc_weights[neighbor_comms == comm_trg])
+
+    delta_src = 2 * W_src - total_degree          # now correct for self-loop nodes
+    delta_trg = total_degree - 2 * W_trg          # now correct for self-loop nodes
+
+    exit_weights_new = exit_weights_old.copy()
+    exit_weights_new[comm_src] += delta_src
+    exit_weights_new[comm_trg] += delta_trg
     return exit_weights_new
 
 
