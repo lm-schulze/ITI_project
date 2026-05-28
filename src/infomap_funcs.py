@@ -375,13 +375,24 @@ def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_ol
 def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_old: np.ndarray,
                         node: int, comm_src: int, comm_trg: int) -> np.ndarray:
     """Update exit weights incrementally when a single node moves communities.
-    Self-loops are explicitly excluded: they never cross community boundaries
-    and must not contribute to exit-weight deltas. (The old code used
-    g.strength(), which counts self-loop weights twice for undirected graphs,
-    causing delta_trg to be overestimated by 2 * self-loop-weight and therefore
-    causing beneficial node moves to be spuriously rejected on compressed graphs.)
+    This is more efficient than recomputing from scratch for undirected graphs.
+
+    Note: Self-loops are explicitly excluded: they never cross community boundaries
+    and must not contribute to exit-weight deltas. 
+
+    Args:
+        g (ig.Graph): (Undirected) input graph.
+        communities_old (list[int]): List of non-overlapping community labels for all nodes.
+        exit_weights_old (np.ndarray): Exit weights before the move.
+        node (int): Node to move.
+        comm_src (int): Source community of the node.
+        comm_trg (int): Target community of the node.
+
+    Returns:
+        np.ndarray: Updated exit weights for each community.
     """
     communities = np.array(communities_old)
+    # safety checks
     if communities[node] != comm_src:
         raise ValueError(f"Node {node} is not in source community {comm_src}")
     if comm_src == comm_trg:
@@ -398,16 +409,12 @@ def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_ol
 
     neighbor_nodes = np.where(inc_edges[:, 0] == node, inc_edges[:, 1], inc_edges[:, 0])
 
-    # ── KEY FIX ────────────────────────────────────────────────────────────────
+    # KEY FIX
     # Discard self-loops: they are always intra-community and never affect exit
     # weights regardless of which community the node is in.
-    # Using g.strength() is wrong here because igraph counts self-loop weight
-    # *twice* for undirected graphs, while g.incident() returns the self-loop
-    # edge only once — the asymmetry corrupts delta_trg.
     not_self    = neighbor_nodes != node
     neighbor_nodes = neighbor_nodes[not_self]
     inc_weights    = inc_weights[not_self]
-    # ───────────────────────────────────────────────────────────────────────────
 
     neighbor_comms = communities[neighbor_nodes]
     total_degree   = np.sum(inc_weights)          # non-self-loop degree only
@@ -423,7 +430,7 @@ def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_ol
     exit_weights_new[comm_trg] += delta_trg
     return exit_weights_new
 
-
+'''
 # it's a bit funkier when we're dealing with directed networks:
 def update_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray, exit_flow_old: np.ndarray, node: int, comm_src: int, comm_trg: int) -> np.ndarray:
     """Update the community exit flow for a directed graph when one node changes communities.
@@ -504,7 +511,110 @@ def update_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray, exi
             exit_flow[comm_trg] -= np.sum(flow_in[mask_trg])
 
     return exit_flow
+'''
 
+def update_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray,
+                     exit_flow_old: np.ndarray,
+                     node: int, comm_src: int, comm_trg: int) -> np.ndarray:
+    """Update the community exit flow for a directed graph when one node changes communities.
+    This function updates the exit flow incrementally instead of recomputing it from scratch.
+
+    Note: Self-loops are explicitly excluded from both the outgoing and incoming edge sections.
+
+    Args:
+        g (ig.Graph): Directed input graph.
+        communities_old (list[int]): List of non-overlapping community labels for all nodes.
+        p (np.ndarray): Node visit frequencies.
+        exit_flow_old (np.ndarray): Exit flow per community before the move.
+        node (int): Node to move.
+        comm_src (int): Source community of the moved node.
+        comm_trg (int): Target community of the moved node.
+
+    Returns:
+        np.ndarray: Updated exit flow for each community.
+
+    """
+    communities = np.array(communities_old)
+    # safety checks
+    if communities[node] != comm_src:
+        raise ValueError(f"Node {node} is not in source community {comm_src}")
+    if comm_src == comm_trg:
+        return exit_flow_old.copy()
+
+    exit_flow        = np.array(exit_flow_old, copy=True)
+    weights          = np.array(g.es["weight"] if g.is_weighted()
+                                else np.ones(g.ecount(), dtype=np.float64))
+    out_strength     = np.array(g.strength(mode="out",
+                                weights="weight" if g.is_weighted() else None))
+    
+
+    # Intentionally includes self-loop weight — keeps flow normalisation correct.
+    node_out_strength = out_strength[node]
+    node_p            = p[node]
+
+    edges        = np.array(g.get_edgelist(), dtype=int)
+    out_edge_ids = np.array(g.incident(node, mode="out"), dtype=int)
+    in_edge_ids  = np.array(g.incident(node, mode="in"),  dtype=int)
+
+    # remember, for the exit flow of a community we need consider its outgoing links
+    # moving the node to another community affects the exit flows of comm_src and comm_trg 
+    # for the other communities the assignment of node doesn't matter because it's external either way
+    # so it contributes to the exit flow the same way as before
+
+    # Update exit flow for outgoing edges from the moved node.
+    if out_edge_ids.size > 0:
+        out_edges = edges[out_edge_ids]
+        trg_all   = out_edges[:, 1]
+        w_all     = weights[out_edge_ids]
+
+        # KEY FIX: drop the self-loop from the edge list.
+        # Without this, the self-loop target carries communities[node] = comm_src,
+        # so trg_com != comm_trg is True and it inflates new_exit / exit_flow[comm_trg].
+        not_self = trg_all != node
+        trg      = trg_all[not_self]
+        w_out    = w_all[not_self]
+
+        if trg.size > 0:
+            trg_com  = communities[trg]
+            # node_out_strength keeps the self-loop weight: correct normalisation.
+            flow     = node_p * w_out / node_out_strength
+
+            old_exit = np.sum(flow[trg_com != comm_src])
+            new_exit = np.sum(flow[trg_com != comm_trg])
+            exit_flow[comm_src] -= old_exit
+            exit_flow[comm_trg] += new_exit
+
+    # Update exit flow for incoming edges into the moved node from other nodes.
+    # Only sources from comm_src or comm_trg can change whether they are external.
+    # For incoming links from other communities it doesn't matter, as they will be external either way
+    if in_edge_ids.size > 0:
+        in_edges = edges[in_edge_ids]
+        src_all  = in_edges[:, 0]
+        w_all    = weights[in_edge_ids]
+
+        # KEY FIX: drop the self-loop from the edge list.
+        # Without this, src == node has src_com == comm_src, so mask_src is True
+        # and the self-loop flow is wrongly added to exit_flow[comm_src].
+        not_self = src_all != node
+        src      = src_all[not_self]
+        w_in     = w_all[not_self]
+
+        if src.size > 0:
+            src_com           = communities[src]
+            out_strength_safe = np.where(out_strength > 0, out_strength, 1.0)
+            flow_in           = p[src] * w_in / out_strength_safe[src]
+
+            # Edges comm_src → node were internal; after the move they exit comm_src.
+            mask_src = src_com == comm_src
+            if np.any(mask_src):
+                exit_flow[comm_src] += np.sum(flow_in[mask_src])
+
+            # Edges comm_trg → node were exiting comm_trg; after the move they are internal.
+            mask_trg = src_com == comm_trg
+            if np.any(mask_trg):
+                exit_flow[comm_trg] -= np.sum(flow_in[mask_trg])
+
+    return exit_flow
 
 
 def pagerank_nonuniform(M, tau: float = 0.15, tol: float = 1e-15, maxiter: int = 1e6):
