@@ -312,65 +312,7 @@ def compute_description_length(g, communities, tau=0.15,
     else:
         return L
     
-'''
 
-def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_old: np.ndarray,
-                           node: int, comm_src: int, comm_trg: int) -> np.ndarray:
-    """Update the exit weights incrementally when a single node is moved from its community to a target community.
-       This is more efficient than recomputing from scratch for undirected graphs.
-
-    Args:
-        g (ig.Graph): (Undirected) input graph.
-        communities_old (list[int]): List of non-overlapping community labels for all nodes.
-        exit_weights_old (np.ndarray): Exit weights before the move.
-        node (int): Node to move.
-        comm_src (int): Source community of the node.
-        comm_trg (int): Target community of the node.
-
-    Returns:
-        np.ndarray: Updated exit weights for each community.
-    """
-    
-    communities = np.array(communities_old)
-    # Safety checks
-    if communities[node] != comm_src:
-        raise ValueError(f"Node {node} is not in source community {comm_src}")
-    if comm_src == comm_trg:
-        return exit_weights_old.copy() 
-    
-    # Compute total degree of the node (sum of all incident edge weights)
-    total_degree = g.strength(node, weights="weight" if g.is_weighted() else None)
-
-    # Gather all edges incident on `node` and their weights — vectorised,
-    # no Python loop, correct on multigraphs.
-    incident_eids = np.array(g.incident(node), dtype=int)
-    all_edges     = np.array(g.get_edgelist(), dtype=int)
-    all_weights   = np.array(
-        g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64)
-    )
-
-    inc_edges   = all_edges[incident_eids]          # shape (deg, 2)
-    inc_weights = all_weights[incident_eids]        # shape (deg,)
-
-    # For each incident edge, find the *other* endpoint's community.
-    neighbor_nodes = np.where(inc_edges[:, 0] == node, inc_edges[:, 1], inc_edges[:, 0])
-    neighbor_comms = communities[neighbor_nodes]
-
-    W_src = np.sum(inc_weights[neighbor_comms == comm_src])
-    W_trg = np.sum(inc_weights[neighbor_comms == comm_trg])
-
-    # Compute deltas (formula unchanged)
-    delta_src = 2 * W_src - total_degree
-    delta_trg = total_degree - 2 * W_trg
-
-    # Update exit weights
-    exit_weights_new = exit_weights_old.copy()
-    exit_weights_new[comm_src] += delta_src
-    exit_weights_new[comm_trg] += delta_trg
-    
-    return exit_weights_new
-
-'''
 
 def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_old: np.ndarray,
                         node: int, comm_src: int, comm_trg: int) -> np.ndarray:
@@ -430,88 +372,6 @@ def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_ol
     exit_weights_new[comm_trg] += delta_trg
     return exit_weights_new
 
-'''
-# it's a bit funkier when we're dealing with directed networks:
-def update_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray, exit_flow_old: np.ndarray, node: int, comm_src: int, comm_trg: int) -> np.ndarray:
-    """Update the community exit flow for a directed graph when one node changes communities.
-
-    This function updates the exit flow incrementally instead of recomputing it from scratch.
-
-    Args:
-        g (ig.Graph): Directed input graph.
-        communities_old (list[int]): List of non-overlapping community labels for all nodes.
-        p (np.ndarray): Node visit frequencies.
-        exit_flow_old (np.ndarray): Exit flow per community before the move.
-        node (int): Node to move.
-        comm_src (int): Source community of the moved node.
-        comm_trg (int): Target community of the moved node.
-
-    Returns:
-        np.ndarray: Updated exit flow for each community.
-    """
-
-    communities = np.array(communities_old)
-    # some safety checks
-    if communities[node] != comm_src:
-        raise ValueError(f"Node {node} is not in source community {comm_src}")
-    if comm_src == comm_trg: # no change in community assignment 
-        return exit_flow_old.copy() # exit flow stays the same 
-
-    exit_flow = np.array(exit_flow_old, copy=True) # old exit flow
-    # for flow computation we need the edge weights and outgoing strength
-    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64)) # network edge weights
-    out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None)) 
-    
-    node_out_strength = out_strength[node] # strength of outgoing links of moved node
-    node_p = p[node] # visit frequency of moved node
-
-    edges = np.array(g.get_edgelist(), dtype=int)
-    out_edge_ids = np.array(g.incident(node, mode="out"), dtype=int)  # outgoing edges of moved node
-    in_edge_ids = np.array(g.incident(node, mode="in"), dtype=int)  # incoming edges of moved node
-
-    # remember, for the exit flow of a community we need consider its outgoing links
-    # moving the node to another community affects the exit flows of comm_src and comm_trg 
-    # for the other communities the assignment of node doesn't matter because it's external either way
-    # so it contributes to the exit flow the same way as before
-
-    # Update exit flow for outgoing edges from the moved node.
-    if out_edge_ids.size > 0:
-        out_edges = edges[out_edge_ids]
-        trg = out_edges[:, 1] # get target nodes of outgoing edges
-        trg_com = communities[trg] # get communities of target nodes
-        flow = node_p * weights[out_edge_ids] / node_out_strength # compute the flow for each outgoing edge
-
-        # Remove old contributions from comm_src and add new contributions to comm_trg.
-        old_exit = np.sum(flow[trg_com != comm_src])  # old exit flow contribution for source comm.
-        new_exit = np.sum(flow[trg_com != comm_trg])  # new exit flow contribution for target comm.
-        exit_flow[comm_src] -= old_exit # subtract flow contribution from source community
-        exit_flow[comm_trg] += new_exit # add flow contribution to target community
-
-    # Update exit flow for incoming edges into the moved node from other nodes.
-    # Only sources from comm_src or comm_trg can change whether they are external.
-    # For incoming links from other communities it doesn't matter, as they will be external either way
-    if in_edge_ids.size > 0:
-        in_edges = edges[in_edge_ids]
-        src = in_edges[:, 0]  # get source nodes of incoming edges
-        src_com = communities[src] # get communities of source nodes
-        out_strength_safe = np.where(out_strength > 0, out_strength, 1.0)
-        flow_in = p[src] * weights[in_edge_ids] / out_strength_safe[src]# compute the flow for each incoming edge
-
-        # Edges from comm_src to the moved node become external after the move.
-        # because they now connect comm_src and comm_trg
-        # so they contribute to comm_src's exit flow
-        mask_src = src_com == comm_src
-        if np.any(mask_src):
-            exit_flow[comm_src] += np.sum(flow_in[mask_src])
-
-        # Edges from comm_trg to the moved node become internal after the move.
-        # so they now longer contribute to the exit flow of comm_trg
-        mask_trg = src_com == comm_trg
-        if np.any(mask_trg):
-            exit_flow[comm_trg] -= np.sum(flow_in[mask_trg])
-
-    return exit_flow
-'''
 
 def update_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray,
                      exit_flow_old: np.ndarray,
@@ -765,12 +625,33 @@ def node_movement_optimization(g, initial_communities=None, teleportation="unifo
     """
     nodes = g.vs.indices
     N_nodes = g.vcount()
-    neighborhood = g.neighborhood(mindist=1)
+    neighborhood = [np.array(nb, dtype=np.intp)
+                for nb in g.neighborhood(mindist=1)]
 
+    # if only one node, automatically return it as only community
+    # and do not try to optimize
+    if N_nodes == 1:
+        if verbose:
+            print("Graph has only one node, returning it as the only community.")
+        if returnTerms:
+            L, p, p_mod, exit_data = compute_description_length(
+                g, np.array([0]), teleportation=teleportation, returnTerms=True
+            )
+            return np.array([0]), L, p_mod, exit_data
+        else:
+            return np.array([0])
+        
+    # if no initial community assignment is provided,
     # initialize community partition with each node being its own community
-    if initial_communities is None:
+    # also do this if there is only 1 community, otherwise there are no neighbouring
+    # communities to move to, and the optimization fails
+    if initial_communities is None or len(np.unique(initial_communities)) == 1:
+        if verbose:
+            print("Initialising node movement optimization with each node in its own community.")
         communities = np.arange(N_nodes) # start with each node assigned to its own community
     else: 
+        if verbose:
+            print("Initialising node movement optimization with the given initial community assignments.")
         communities = initial_communities.copy()
         
     L, p, p_mod, exit_data = compute_description_length(
@@ -782,32 +663,52 @@ def node_movement_optimization(g, initial_communities=None, teleportation="unifo
 
     optimizable = True
     while optimizable:
-        random.shuffle(nodes)
+        nodes = np.random.permutation(nodes)
         no_move_ctr = 0
 
         for n in nodes:
             neighbors = neighborhood[n]
             nb_comms = communities[neighbors]
             src_comm = communities[n]
-            comms_to_test = np.unique(nb_comms)
-            comms_to_test = comms_to_test[comms_to_test != src_comm]
+            # set logic supposedly slightly faster than np.unique?
+            seen = set()
+            comms_to_test = []
+            for c in nb_comms:
+                ci = int(c)
+                if ci != src_comm and ci not in seen:
+                    seen.add(ci)
+                    comms_to_test.append(ci)
 
-            L_best, communities_best, p_mod_best, exit_data_best = L, communities.copy(), p_mod.copy(), exit_data.copy()
-
+            if not comms_to_test: # if it's empty for some ungodly reason
+                no_move_ctr += 1
+                continue
+            
+            # init best params
+            L_best = L
+            best_comm = src_comm   # to track if moves have been made
+            p_mod_best = None
+            exit_data_best = None
+            communities_best = None
+            # go through neighbouring communities:
             for nbc in comms_to_test:
                 L_new, communities_new, p_mod_new, exit_data_new = update_node_move_description_length(
                     g, communities, p, p_mod, exit_data, n, nbc,
                     teleportation=teleportation, returnTerms=True
                 )
-                if L_new is not None and L_new < L_best:
-                    L_best, communities_best, p_mod_best, exit_data_best = L_new, communities_new.copy(), p_mod_new.copy(), exit_data_new.copy()
+                if L_new is not None and L_new < L_best: # improvement was made
+                    L_best = L_new
+                    best_comm = nbc
+                    p_mod_best = p_mod_new      # already a fresh array from the helper
+                    exit_data_best = exit_data_new
+                    communities_best = communities_new
 
-            if communities[n] == communities_best[n]:
-                no_move_ctr += 1
-
-            L, communities, p_mod, exit_data = L_best, communities_best.copy(), p_mod_best.copy(), exit_data_best.copy()
-            # No relabelling here: empty-community slots stay at zero and are
-            # harmless to safe_xlogx. Arrays remain size N throughout the sweep.
+            if best_comm == src_comm: # no move has been made
+                no_move_ctr += 1 
+            else: # update the terms
+                L = L_best
+                communities = communities_best
+                p_mod = p_mod_best
+                exit_data = exit_data_best
 
         # only stop optimizing if not a single improving move has been made in the sequence
         # otherwise keep optimizing
@@ -947,4 +848,3 @@ def compress_network(g: ig.Graph, communities: list[int], verbose=False) -> tupl
     # we should be able to reconstruct the assignments from the unique_communites list
     # as it contains the mapping of og community -> compressed node index (== list index)
     return g_compressed, unique_communities.copy()
-
