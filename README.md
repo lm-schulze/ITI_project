@@ -7,9 +7,6 @@ Contributors:
 - Savina Tsichli ([@savinats](https://github.com/savinats))
   
 The project consists of the following files and folders (to be updated as the project progresses):
-- **filename**: file description.
-
-## Files in **_saviti_** branch
 
 - **test_graphs/**: folder containing test graphs exported as GraphML, (weighted/unweighted, directed/undirected); as well as visualizations of each graph as .pdf
 - **src/**: folder containing the implemented functions for infomap
