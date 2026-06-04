@@ -553,6 +553,7 @@ def update_node_move_description_length(g, communities_old, p_old, p_mod_old, ex
             return None
 
     # Nonuniform: fall back to full recompute
+    # TODO: implement nonuniform update funcs, if we have the time
     if teleportation == "nonuniform":
         communities_old = np.array(communities_old)
         communities_new = communities_old.copy()
