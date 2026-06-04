@@ -1,0 +1,283 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# --- PARAMETERS ---
+n <- 25          # total nodes
+m <- 4            # number of modules
+p_in <- 0.35       # within-module connection probability
+p_out <- 0.008     # between-module connection probability
+
+# --- LIBRARIES ---
+library(igraph)
+
+# --- ASSIGN NODES TO MODULES ---
+module_sizes <- rep(floor(n/m), m)
+remainder <- n - sum(module_sizes)
+if (remainder > 0) module_sizes[1:remainder] <- module_sizes[1:remainder] + 1
+
+membership <- rep(1:m, times = module_sizes)
+
+# --- CREATE ADJACENCY MATRIX ---
+adj <- matrix(0, n, n)
+for (i in 1:n) {
+  for (j in 1:n) {
+    if (i != j) {
+      if (membership[i] == membership[j]) {
+        adj[i, j] <- rbinom(1, 1, p_in)
+      } else {
+        adj[i, j] <- rbinom(1, 1, p_out)
+      }
+    }
+  }
+}
+
+# --- MAKE GRAPH ---
+g <- graph_from_adjacency_matrix(adj, mode = "undirected", diag = FALSE)
+
+# --- VISUALIZE ---
+plot(
+  g,
+  vertex.color = membership,
+  vertex.size = 6,
+  vertex.label = NA,
+  layout = layout_with_fr(g),
+  main = paste("Synthetic Modular Network (n =", n, ", m =", m, ")")
+)
+
+```
+
+```{r}
+set.seed(42)
+visit_count <- numeric(n)
+current <- sample(1:n, 1)  # start at random node
+s <- 1000       # number of steps in random walk
+teleport_prob <- 0.05  # probability of teleporting to a random node
+
+for (step in 1:s) {
+  visit_count[current] <- visit_count[current] + 1
+  
+  # Teleportation step
+  if (runif(1) < teleport_prob) {
+    current <- sample(1:n, 1)
+    next
+  }
+  
+  # Regular step: move to random neighbor (if any)
+  neighbors <- neighbors(g, current)
+  if (length(neighbors) == 0) {
+    current <- sample(1:n, 1)  # teleport if isolated
+  } else {
+    current <- sample(neighbors, 1)
+  }
+}
+
+# --- COMPUTE VISIT FREQUENCIES ---
+visit_freq <- visit_count / sum(visit_count)
+node_probs <- data.frame(
+  node_id = 1:n,
+  module = membership,
+  freq = visit_freq,
+  perc_time = 100 * visit_freq
+)
+
+# --- DISPLAY ---
+head(node_probs[order(-node_probs$freq), ], 10)
+cat("\nCoverage: visited", sum(visit_count > 0), "of", n, "nodes (",
+    round(100 * sum(visit_count > 0) / n, 1), "%)\n")
+```
+
+```{r}
+# -------------------------------
+# PURE R HUFFMAN CODING FUNCTION
+# -------------------------------
+huffman_code <- function(symbols, probs) {
+  # Create initial forest of leaf nodes
+  forest <- lapply(seq_along(symbols), function(i) {
+    list(symbol = symbols[i], prob = probs[i], left = NULL, right = NULL)
+  })
+  
+  # Combine nodes until only one tree remains
+  while (length(forest) > 1) {
+    # Sort by probability
+    forest <- forest[order(sapply(forest, function(x) x$prob))]
+    
+    # Take two smallest
+    left <- forest[[1]]
+    right <- forest[[2]]
+    
+    # Merge them
+    new_node <- list(
+      symbol = NULL,
+      prob = left$prob + right$prob,
+      left = left,
+      right = right
+    )
+    
+    # Replace forest
+    forest <- c(list(new_node), forest[-c(1,2)])
+  }
+  
+  # Recursively extract codes
+  codes <- list()
+  
+  extract_codes <- function(node, prefix = "") {
+    if (!is.null(node$symbol)) {
+      # Leaf node
+      codes[[as.character(node$symbol)]] <<- prefix
+      return()
+    }
+    extract_codes(node$left, paste0(prefix, "0"))
+    extract_codes(node$right, paste0(prefix, "1"))
+  }
+  
+  extract_codes(forest[[1]])
+  return(codes)
+}
+```
+
+
+```{r}
+# --- ASSIGN NODE CODES (HUFFMAN PER MODULE) ---
+node_codes <- rep("", n)
+
+for (mod in 1:m) {
+  nodes <- which(membership == mod)
+  freqs <- visit_freq[nodes]
+  
+  # Avoid zero probabilities
+  freqs[freqs == 0] <- min(freqs[freqs > 0]) * 0.5
+  
+  # Use custom Huffman
+  huff <- huffman_code(nodes, freqs)
+  
+  # Store codes
+  for (i in nodes) {
+    node_codes[i] <- huff[[as.character(i)]]
+  }
+}
+
+cat("\n===== NODE CODEBOOK =====\n")
+
+node_table <- data.frame(
+  node = 1:n,
+  module = membership,
+  code = node_codes,
+  stringsAsFactors = FALSE
+)
+
+# Sort by module then node
+node_table <- node_table[order(node_table$module, node_table$node), ]
+
+print(node_table)
+
+cat("\nTotal nodes:", n, "\n")
+```
+
+```{r}
+# --- MODULE ENTRY & EXIT CODES (FIXED BY USER) ---
+module_entry <- c(
+  "111",    # A
+  "0",      # B
+  "10",     # C
+  "110"     # D
+)
+
+module_exit <- c(
+  "0001",   # A
+  "1011",   # B
+  "0001",   # C
+  "000"     # D
+)
+```
+
+```{r}
+# --- VISUALIZATION ---
+layout <- layout_with_fr(g, niter = 500)   # more spreading of nodes
+cols <- c("red", "blue", "orange", "darkgreen")
+
+# Allow drawing outside the plot area for nice legend placement
+par(xpd = TRUE, mar = c(4, 4, 4, 10))
+
+plot(
+  g,
+  layout = layout,
+  vertex.color = cols[membership],
+  vertex.size = 32,              # bigger nodes so labels fit
+  vertex.label = node_codes,
+  vertex.label.color = "white",  # high contrast
+  vertex.label.cex = 0.8,        # smaller, fits inside
+  vertex.label.font = 2,         # bold
+  edge.arrow.size = 0,
+  margin = 0.2,
+  main = "Modular Network With Node Codes"
+)
+
+# Add legend to the far right, not overlapping
+legend(
+  "right",
+  inset = c(-0.15, 0),
+  legend = paste0("Module ", LETTERS[1:m],
+                  "\n Entry = ", module_entry,
+                  "\n Exit  = ", module_exit),
+  col = cols,
+  pch = 19,
+  pt.cex = 1.7,
+  bty = "n",
+  cex = 0.9,
+  text.col = cols
+)
+```
+
+```{r}
+# --- RANDOM WALK ENCODING FUNCTION ---
+encode_walk <- function(path, membership, node_codes, module_entry, module_exit) {
+  encoded <- c()
+  
+  prev_mod <- membership[path[1]]
+  encoded <- c(encoded, module_entry[prev_mod], node_codes[path[1]])
+  
+  for (i in 2:length(path)) {
+    mod_prev <- membership[path[i - 1]]
+    mod_now  <- membership[path[i]]
+    
+    if (mod_prev != mod_now) {
+      encoded <- c(encoded,
+                   module_exit[mod_prev],
+                   module_entry[mod_now])
+    }
+    
+    encoded <- c(encoded, node_codes[path[i]])
+  }
+  
+  paste(encoded, collapse = "")
+}
+```
+
+```{r}
+# --- GENERATE A NEW WALK AND ENCODE IT ---
+walk_len <- 40
+rw <- numeric(walk_len)
+rw[1] <- sample(1:n, 1)
+
+for (i in 2:walk_len) {
+  if (runif(1) < teleport_prob) {
+    rw[i] <- sample(1:n, 1)
+  } else {
+    ne <- neighbors(g, rw[i - 1])
+    if (length(ne) == 0) rw[i] <- sample(1:n, 1)
+    else rw[i] <- sample(ne, 1)
+  }
+}
+
+encoded_walk <- encode_walk(rw, membership, node_codes, module_entry, module_exit)
+
+cat("\nRandom walk node sequence:\n")
+print(rw)
+cat("\nEncoded walk:\n")
+cat(encoded_walk, "\n")
+cat("\nEncoded length:", nchar(encoded_walk), "bits\n")
+```
+
