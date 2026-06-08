@@ -68,8 +68,12 @@ def visual_community_colors(g: ig.Graph, communities=None, skipLayout=False):
     Returns:
         dict: Dict of visual style settings to be passed to igraph.plot()
     """
-    if communities is None and "community" in g.vertex_attributes():
-        communities = g.vs["community"]
+    if communities is None:
+        if "community" in g.vertex_attributes():
+            communities = g.vs["community"]
+        else:
+            communities = [0] * g.vcount()  # default: single color for all nodes
+
     c = max(communities) + 1
     palette = ig.RainbowPalette(n=c)
 

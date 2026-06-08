@@ -1,7 +1,7 @@
 import igraph as ig
 import numpy as np
 import warnings   
-import map_equation as meq
+import src.map_equation as meq
 
 
 def compress_network(g: ig.Graph, communities: list[int], verbose=False) -> tuple:
