@@ -8,7 +8,7 @@ Contributors:
 This project implements and compares two approaches to community detection based on the map equation: the classic **Infomap** algorithm, which uses a 
 greedy stochastic search to optimize the map equation directly, and **Neuromap**, which learns a soft cluster assignment matrix end-to-end via a neural network and gradient descent. 
 
-For Infomap, we implement the core map equation (description length computation), the search algorithm for finding optimal partitions, and the submodule refinement step, validating our implementation against igraph's `community_infomap` and the official Infomap package.
+For Infomap, we implement the core map equation (description length computation), the search algorithm for finding optimal partitions, and the submodule refinement step, validating our implementation against igraph and the official Infomap package.
 
 For Neuromap, we test three encoder architectures; a Graph Convolutional Network (GCN), GraphSAGE, and FastGCN, in order to compare how architecture choice affects the resulting communities and codelength.
 
