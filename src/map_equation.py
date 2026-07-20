@@ -2,6 +2,31 @@
 import igraph as ig
 import numpy as np
 import warnings
+import scipy.sparse as sp
+
+
+def build_sparse_adjacency(g: ig.Graph) -> sp.csr_matrix:
+    """Build a sparse (CSR) (weighted) adjacency matrix for a (directed) graph.
+
+    This replaces g.get_adjacency(), in order to avoid memory issues when 
+    working with large graphs.
+
+    Args:
+        g (ig.Graph): Input graph.
+
+    Returns:
+        sp.csr_matrix: Sparse adjacency matrix.
+    """
+    N = g.vcount()
+    if g.ecount() == 0:
+        return sp.csr_matrix((N, N))
+
+    edges = np.array(g.get_edgelist(), dtype=np.int64)
+    weights = np.array(
+        g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64)
+    )
+    adj = sp.coo_matrix((weights, (edges[:, 0], edges[:, 1])), shape=(N, N)).tocsr()
+    return adj
 
 # compute x*log2(x) and safely handle log(0) issues:
 # by safely handle I mean just set it to zero
@@ -9,10 +34,10 @@ def safe_xlogx(x):
     """Compute x*log2(x) safely, setting log(0) to zero.
 
     Args:
-        x (_type_): input value or array for which to compute x*log2(x)
+        x: input value or array for which to compute x*log2(x)
 
     Returns:
-        _type_: x*log2(x) for x > 0, and 0 for x <= 0
+        x*log2(x) for x > 0, and 0 for x <= 0
     """
     safe_x = np.where(x > 0.0, x, 1.0)   # replace 0s with 1 to avoid that pesky Divide By 0 issue
     return np.where(x > 0.0, safe_x * np.log2(safe_x), 0.0) # set these points manually to 0
@@ -89,7 +114,7 @@ def pagerank(M, tau: float = 0.15, tol: float = 1e-15, maxiter: int = 1e6):
 
     Parameters
     ----------
-    M : numpy array
+    M : scipy.sparse matrix or numpy array
         adjacency/strength matrix where M[i,j] = weight of edge i -> j  (rows are sources)
     tau : float, optional
         teleportation probability, by default 0.15
@@ -106,10 +131,17 @@ def pagerank(M, tau: float = 0.15, tol: float = 1e-15, maxiter: int = 1e6):
     """
 
     N = M.shape[0]
-    row_sums = M.sum(axis=1)   # corrsponds to out strength
+    is_sparse = sp.issparse(M) # if we're working with a sparse matrix
+
+    row_sums = np.asarray(M.sum(axis=1)).ravel() # corrsponds to out strength
     dangling = (row_sums == 0) # dangling nodes (no outgoing edges)
     row_sums_safe = np.where(dangling, 1, row_sums) # set to one for normalisation
-    M_normalised = M / row_sums_safe[:, None]   # row-stochastic: T[i,j] = p(i->j)
+
+    if is_sparse:
+        M_normalised = sp.diags((1.0 / row_sums_safe)) @ M   # row-stochastic: T[i,j] = p(i->j)
+        M_normalised = M_normalised.tocsr()
+    else:
+        M_normalised = M / row_sums_safe[:, None]   # row-stochastic: T[i,j] = p(i->j)
 
     p = np.ones(N) / N # init with uniform node visit prob
     for i in range(int(maxiter)):
@@ -158,8 +190,9 @@ def compute_description_length(g, communities, tau=0.15,
             return 0.0
     
     if g.is_directed():
-        adj = np.array(g.get_adjacency(attribute="weight" if g.is_weighted() else None).data, dtype=float)
-        
+        #adj = np.array(g.get_adjacency(attribute="weight" if g.is_weighted() else None).data, dtype=float)
+        adj = build_sparse_adjacency(g) # for handling large graphs
+
         if teleportation == "uniform":
             # === Uniform recorded teleportation ===
             p = pagerank(adj, tau=tau)
@@ -403,12 +436,20 @@ def pagerank_nonuniform(M, tau: float = 0.15, tol: float = 1e-15, maxiter: int =
     via teleportation, which is unrecorded in this scheme).
     """
     N = M.shape[0]
-    row_sums = M.sum(axis=1)
-    col_sums = M.sum(axis=0)
+    is_sparse = sp.issparse(M)
+
+    # .sum() on a sparse matrix returns a np.matrix -> flatten to a plain 1D array
+    row_sums = np.asarray(M.sum(axis=1)).ravel()
+    col_sums = np.asarray(M.sum(axis=0)).ravel()
     dangling = (row_sums == 0)
     no_incoming = (col_sums == 0)
     row_sums_safe = np.where(dangling, 1, row_sums)
-    M_norm = M / row_sums_safe[:, None]
+
+    if is_sparse:
+        # Sparse row-rescaling: keeps nnz(M_norm) == nnz(M), no densification.
+        M_norm = (sp.diags(1.0 / row_sums_safe) @ M).tocsr()
+    else:
+        M_norm = M / row_sums_safe[:, None]
 
     total_out = row_sums.sum()
     d = row_sums / total_out if total_out > 0 else np.ones(N) / N
