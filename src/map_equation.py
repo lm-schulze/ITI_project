@@ -168,6 +168,82 @@ def pagerank(M, tau: float = 0.15, tol: float = 1e-10, maxiter: int = 1e6):
     return p
 
 
+def pagerank_nonuniform(M, tau: float = 0.15, tol: float = 1e-15, maxiter: int = 1e6):
+    """Two-step PageRank for smart unrecorded teleportation (tutorial Eq. 4-6).
+    
+    Step 1: solve for p* with teleportation proportional to out-strength.
+    Step 2: take one extra link-only step to get the recorded visit rates p.
+    
+    Nodes with no incoming edges are zeroed out (they can only be reached
+    via teleportation, which is unrecorded in this scheme).
+    """
+    N = M.shape[0]
+    is_sparse = sp.issparse(M)
+
+    # .sum() on a sparse matrix returns a np.matrix -> flatten to a plain 1D array
+    row_sums = np.asarray(M.sum(axis=1)).ravel()
+    col_sums = np.asarray(M.sum(axis=0)).ravel()
+    dangling = (row_sums == 0)
+    no_incoming = (col_sums == 0)
+    row_sums_safe = np.where(dangling, 1, row_sums)
+
+    if is_sparse:
+        # Sparse row-rescaling: keeps nnz(M_norm) == nnz(M), no densification.
+        M_norm = (sp.diags(1.0 / row_sums_safe) @ M).tocsr()
+    else:
+        M_norm = M / row_sums_safe[:, None]
+
+    total_out = row_sums.sum()
+    d = row_sums / total_out if total_out > 0 else np.ones(N) / N
+
+    # Step 1
+    p_star = np.ones(N) / N
+    for _ in range(int(maxiter)):
+        dangling_sum = p_star[dangling].sum()
+        p_star_new = (1 - tau) * (p_star @ M_norm + dangling_sum * d) + tau * d
+        if np.linalg.norm(p_star_new - p_star) < tol:
+            p_star = p_star_new
+            break
+        p_star = p_star_new
+
+    # Step 2: link-only step + dangling redistribution
+    dangling_sum = p_star[dangling].sum()
+    p = p_star @ M_norm + dangling_sum * d
+    p[no_incoming] = 0
+    p = p / p.sum()
+    return p
+
+
+def compute_enter_flow_nonuniform(g: ig.Graph,
+                                  communities: list[int],
+                                  p: np.ndarray,
+                                  edges=None,
+                                  weights=None,
+                                  out_strength=None
+                                  ) -> np.ndarray:
+    """
+        Rate of flow entering each community via incoming edges from outside.
+    """
+    communities = np.array(communities)
+    if out_strength is None:
+        out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None))
+    if weights is None:
+        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
+    if edges is None:
+        edges = np.array(g.get_edgelist(), dtype=int)
+
+    src, trg = edges[:, 0], edges[:, 1]
+    src_com, trg_com = communities[src], communities[trg]
+    betw = src_com != trg_com
+
+    out_str_safe = np.where(out_strength > 0, out_strength, 1.0)
+    flow = p[src] * weights / out_str_safe[src]
+
+    enter_flow = np.zeros(max(communities) + 1)
+    np.add.at(enter_flow, trg_com[betw], flow[betw])
+    return enter_flow
+
+
 def compute_description_length(g, communities,
                                edges=None,
                                weights=None, 
@@ -295,7 +371,6 @@ def compute_description_length(g, communities,
         return L
     
 
-
 def update_exit_weights(g: ig.Graph, 
                         communities_old: list[int], 
                         exit_weights_old: np.ndarray,
@@ -323,7 +398,7 @@ def update_exit_weights(g: ig.Graph,
     Returns:
         np.ndarray: Updated exit weights for each community.
     """
-    communities = np.array(communities_old)
+    communities = np.asarray(communities_old)
     # safety checks
     if communities[node] != comm_src:
         raise ValueError(f"Node {node} is not in source community {comm_src}")
@@ -400,7 +475,7 @@ def update_exit_flow(g: ig.Graph,
         np.ndarray: Updated exit flow for each community.
 
     """
-    communities = np.array(communities_old)
+    communities = np.asarray(communities_old)
     # safety checks
     if communities[node] != comm_src:
         raise ValueError(f"Node {node} is not in source community {comm_src}")
@@ -491,88 +566,14 @@ def update_exit_flow(g: ig.Graph,
     return exit_flow
 
 
-def pagerank_nonuniform(M, tau: float = 0.15, tol: float = 1e-15, maxiter: int = 1e6):
-    """Two-step PageRank for smart unrecorded teleportation (tutorial Eq. 4-6).
-    
-    Step 1: solve for p* with teleportation proportional to out-strength.
-    Step 2: take one extra link-only step to get the recorded visit rates p.
-    
-    Nodes with no incoming edges are zeroed out (they can only be reached
-    via teleportation, which is unrecorded in this scheme).
-    """
-    N = M.shape[0]
-    is_sparse = sp.issparse(M)
-
-    # .sum() on a sparse matrix returns a np.matrix -> flatten to a plain 1D array
-    row_sums = np.asarray(M.sum(axis=1)).ravel()
-    col_sums = np.asarray(M.sum(axis=0)).ravel()
-    dangling = (row_sums == 0)
-    no_incoming = (col_sums == 0)
-    row_sums_safe = np.where(dangling, 1, row_sums)
-
-    if is_sparse:
-        # Sparse row-rescaling: keeps nnz(M_norm) == nnz(M), no densification.
-        M_norm = (sp.diags(1.0 / row_sums_safe) @ M).tocsr()
-    else:
-        M_norm = M / row_sums_safe[:, None]
-
-    total_out = row_sums.sum()
-    d = row_sums / total_out if total_out > 0 else np.ones(N) / N
-
-    # Step 1
-    p_star = np.ones(N) / N
-    for _ in range(int(maxiter)):
-        dangling_sum = p_star[dangling].sum()
-        p_star_new = (1 - tau) * (p_star @ M_norm + dangling_sum * d) + tau * d
-        if np.linalg.norm(p_star_new - p_star) < tol:
-            p_star = p_star_new
-            break
-        p_star = p_star_new
-
-    # Step 2: link-only step + dangling redistribution
-    dangling_sum = p_star[dangling].sum()
-    p = p_star @ M_norm + dangling_sum * d
-    p[no_incoming] = 0
-    p = p / p.sum()
-    return p
-
-
-def compute_enter_flow_nonuniform(g: ig.Graph,
-                                  communities: list[int],
-                                  p: np.ndarray,
-                                  edges=None,
-                                  weights=None,
-                                  out_strength=None
-                                  ) -> np.ndarray:
-    """
-        Rate of flow entering each community via incoming edges from outside.
-    """
-    communities = np.array(communities)
-    if out_strength is None:
-        out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None))
-    if weights is None:
-        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
-    if edges is None:
-        edges = np.array(g.get_edgelist(), dtype=int)
-
-    src, trg = edges[:, 0], edges[:, 1]
-    src_com, trg_com = communities[src], communities[trg]
-    betw = src_com != trg_com
-
-    out_str_safe = np.where(out_strength > 0, out_strength, 1.0)
-    flow = p[src] * weights / out_str_safe[src]
-
-    enter_flow = np.zeros(max(communities) + 1)
-    np.add.at(enter_flow, trg_com[betw], flow[betw])
-    return enter_flow
-
-def update_node_move_description_length(g, 
+def update_node_move_description_length(g,  
                                         communities_old,
                                         p_old, 
                                         p_mod_old, 
                                         exits_old,
                                         node, 
-                                        comm_trg, 
+                                        comm_trg,
+                                        node_counts_old=None, 
                                         edges=None,
                                         weights=None,
                                         out_strength=None,
@@ -593,7 +594,7 @@ def update_node_move_description_length(g,
     if comm_src == comm_trg:
         warnings.warn(f"Node already in target community {comm_trg}! No change.")
         if returnTerms:
-            return None, communities_old, p_mod_old, exits_old
+            return None, node_counts_old, p_mod_old, exits_old
         else:
             return None
 
@@ -604,7 +605,7 @@ def update_node_move_description_length(g,
         communities_new = communities_old.copy()
         communities_new[node] = comm_trg
         if returnTerms:
-            L, p_new, p_mod_new, exit_data = compute_description_length(
+            L, _, p_mod_new, exit_data = compute_description_length(
                 g, communities_new, tau=tau, teleportation="nonuniform",
                 edges=edges, weights=weights, out_strength=out_strength,
                 returnTerms=True, verbose=verbose
@@ -619,9 +620,9 @@ def update_node_move_description_length(g,
                                               verbose=verbose)
 
     # === Uniform path: existing incremental update ===
-    communities_old = np.array(communities_old)
-    communities_new = communities_old.copy()
-    communities_new[node] = comm_trg
+    # communities_old = np.array(communities_old)
+    # communities_new = communities_old.copy()
+    # communities_new[node] = comm_trg
 
     num_communities = len(p_mod_old)
     N = g.vcount()
@@ -632,7 +633,16 @@ def update_node_move_description_length(g,
     p_mod_new[comm_trg] += p_node
 
     if g.is_directed():
-        node_counts = np.bincount(communities_new, minlength=num_communities)
+        if node_counts_old is None: # THIS SHOULDN'T HAPPEN!! (but just in case)
+            communities_new = communities_old.copy()
+            communities_new[node] = comm_trg
+            node_counts = np.bincount(communities_new, minlength=num_communities)
+        else:
+            # only comm_src and comm_trg change, by exactly 1 node each.
+            node_counts = node_counts_old.copy()   # O(num_communities), not O(N)
+            node_counts[comm_src] -= 1
+            node_counts[comm_trg] += 1
+
         exit_flow_new = update_exit_flow(g, communities_old,
                                          p_old, exits_old,
                                          node, comm_src, comm_trg,
@@ -663,9 +673,10 @@ def update_node_move_description_length(g,
         - np.sum(safe_xlogx(p_old)) + np.sum(safe_xlogx(p_loop))
 
     exit_data = exit_flow_new if g.is_directed() else exit_weights_new
+    node_counts_new = node_counts if g.is_directed() else None  # urgh this is ugly but I'm not sure how to handle it better 
 
     if returnTerms:
-        return L, communities_new, p_mod_new, exit_data
+        return L, node_counts_new, p_mod_new, exit_data
     else:
         return L
 

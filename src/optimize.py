@@ -57,11 +57,12 @@ def build_incidence_index(g: ig.Graph, edges: np.ndarray) -> dict:
 
 def build_graph_cache(g: ig.Graph, teleportation="uniform") -> dict:
     """
-    Precompute per-graph arrays (edges, weights etc) that stay constant while
-    community labels change. This is useful for dealing with huge graphs where
-    these computing these becomes really expensive. Needs to be rebuild for each 
-    distinct graph object (so once per compression level/induced subgraph)
+    Precompute per-graph arrays (edges, weights, node visit frequencies etc) that 
+    stay constant while community labels change. This is useful for dealing with huge
+    graphs where these computing these becomes really expensive. Needs to be rebuild for each 
+    distinct graph object (so once per compression level/induced subgraph).
     """
+
     edge_list = g.get_edgelist()
     edges = (np.array(edge_list, dtype=np.int64) if edge_list
             else np.empty((0, 2), dtype=np.int64)) 
@@ -94,6 +95,10 @@ def build_graph_cache(g: ig.Graph, teleportation="uniform") -> dict:
 
     # build incidence lookup dict
     cache["incidence"] = build_incidence_index(g, edges)
+
+    # build neighborhood list
+    cache["neighborhood"] = [np.array(nb, dtype=np.intp)
+                             for nb in g.neighborhood(mindist=1)]
 
     return cache
 
@@ -234,8 +239,11 @@ def node_movement_optimization(g,
     """
     nodes = g.vs.indices
     N_nodes = g.vcount()
-    neighborhood = [np.array(nb, dtype=np.intp)
+    if cache is None:
+        neighborhood = [np.array(nb, dtype=np.intp)
                 for nb in g.neighborhood(mindist=1)]
+    else: 
+        neighborhood = cache["neighborhood"]
 
     # if only one node, automatically return it as only community
     # and do not try to optimize
@@ -265,13 +273,17 @@ def node_movement_optimization(g,
 
     # build graph cache to avoid recomputing edges/weights later:
     if cache is None:
-        cache = build_graph_cache(g)
+        cache = build_graph_cache(g, teleportation=teleportation)
         
     L, p, p_mod, exit_data = meq.compute_description_length(
         g, communities, teleportation=teleportation, edges=cache["edges"],
         weights=cache["weights"], out_strength=cache["out_strength"],
         adj=cache["adj"], p=cache["p"], returnTerms=True
     )
+
+    # TODO: put node_counts as a compute_description_length return term?
+    num_communities = len(p_mod)
+    node_counts = np.bincount(communities, minlength=num_communities) if g.is_directed() else None
 
     if verbose:
         print(f"Starting from description length: {L}")
@@ -281,7 +293,9 @@ def node_movement_optimization(g,
         nodes = np.random.permutation(nodes)
         no_move_ctr = 0
 
-        for n in nodes:
+        for i, n in enumerate(nodes):
+            # if verbose:
+            #     print(f"Checking node {i+1}/{N_nodes}")
             neighbors = neighborhood[n]
             nb_comms = communities[neighbors]
             src_comm = communities[n]
@@ -303,11 +317,13 @@ def node_movement_optimization(g,
             best_comm = src_comm   # to track if moves have been made
             p_mod_best = None
             exit_data_best = None
-            communities_best = None
+            node_counts_best = None
+            # communities_best = None # REPLACED??
             # go through neighbouring communities:
             for nbc in comms_to_test:
-                L_new, communities_new, p_mod_new, exit_data_new = meq.update_node_move_description_length(
+                L_new, node_counts_new, p_mod_new, exit_data_new = meq.update_node_move_description_length(
                     g, communities, p, p_mod, exit_data, n, nbc,
+                    node_counts_old = node_counts,
                     edges=cache["edges"], weights=cache["weights"], 
                     out_strength=cache["out_strength"],
                     incidence_dict=cache["incidence"],
@@ -318,15 +334,18 @@ def node_movement_optimization(g,
                     best_comm = nbc
                     p_mod_best = p_mod_new      # already a fresh array from the helper
                     exit_data_best = exit_data_new
-                    communities_best = communities_new
+                    node_counts_best = node_counts_new
+                    # communities_best = communities_new # REPLACED
 
             if best_comm == src_comm: # no move has been made
                 no_move_ctr += 1 
             else: # update the terms
                 L = L_best
-                communities = communities_best
+                communities[n] = best_comm # change the winning community in-place
                 p_mod = p_mod_best
                 exit_data = exit_data_best
+                if g.is_directed():
+                    node_counts = node_counts_best
 
         # only stop optimizing if not a single improving move has been made in the sequence
         # otherwise keep optimizing
@@ -341,6 +360,9 @@ def node_movement_optimization(g,
             weights=cache["weights"], out_strength=cache["out_strength"],
             adj = cache["adj"], p=cache["p"], returnTerms=True
             )
+        # TODO: include node_counts in description length return terms??
+        num_communities = len(p_mod)
+        node_counts = np.bincount(communities, minlength=num_communities) if g.is_directed() else None
 
         if verbose:
             print(f"Current best description length: {L}")
@@ -377,7 +399,7 @@ def core_search_algorithm(g:ig.Graph, teleportation="uniform", cache=None, verbo
     # maps to the supernodes of the current compressed graph
     # build graph cache if not given as argument
     if cache is None:
-        cache = build_graph_cache(g) # graph cache
+        cache = build_graph_cache(g, teleportation=teleportation) # graph cache
 
     g_current = g 
     cache_current = cache.copy() # copy so the original graph cache isn't altered
@@ -426,7 +448,7 @@ def core_search_algorithm(g:ig.Graph, teleportation="uniform", cache=None, verbo
         
         # --- Phase 2: Network compression ---
         g_current, _ = compress_network(g_current, comms_level, verbose=verbose)
-        cache_current = build_graph_cache(g_current) # new graph cache
+        cache_current = build_graph_cache(g_current, teleportation=teleportation) # new graph cache
 
         if verbose: 
             print(f"    Compressed network has description length L = {meq.compute_description_length(g_current, range(n_communities))}")
@@ -541,7 +563,7 @@ def submodule_movement_optimization(g: ig.Graph,
     """
     # build graph cache
     if cache is None:
-        cache = build_graph_cache(g)
+        cache = build_graph_cache(g, teleportation=teleportation)
 
     if communities is None:
         if verbose:
@@ -604,8 +626,8 @@ def submodule_movement_optimization(g: ig.Graph,
                 )
         
         if verbose:
-            print(f"local_comms: {local_comms}")
-            print(f"unique local submodules: {np.unique(local_comms)}")
+            #print(f"local_comms: {local_comms}")
+            #print(f"unique local submodules: {np.unique(local_comms)}")
             print(f"n_submodules: {len(np.unique(local_comms))}")
 
         # Normalise local labels to contiguous 0-indexed integers,
@@ -618,8 +640,8 @@ def submodule_movement_optimization(g: ig.Graph,
 
         if verbose:
             print(f"offset: {offset}")
-            print(f"local_idx: {local_idx}")
-            print(f"global labels assigned: {global_submodule[nodes]}")
+            #print(f"local_idx: {local_idx}")
+            #print(f"global labels assigned: {global_submodule[nodes]}")
 
         # Each local submodule belongs to the current parent module.
         submodule_to_parent.extend([mod_idx] * n_submodules) # update parent map
@@ -658,9 +680,9 @@ def submodule_movement_optimization(g: ig.Graph,
         dtype=int,
     )
 
-    if verbose:
-        print("\nAfter compressed optimisation:")
-        print(f"final_compressed_comms: {final_compressed_comms}")
+    # if verbose:
+    #     print("\nAfter compressed optimisation:")
+    #     print(f"final_compressed_comms: {final_compressed_comms}")
 
     # map the refined partition back to og nodes
     compressed_node_idx = np.searchsorted(unique_submodule_labels, global_submodule)
@@ -712,7 +734,7 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
     """
 
     N = g.vcount() # number of nodes in graph
-    cache = build_graph_cache(g)
+    cache = build_graph_cache(g, teleportation=teleportation)
     if verbose:
         print(f"--- Running community search ---------------------------------------")
         print(f"Input Graph: {N} nodes, {g.ecount()} edges")
