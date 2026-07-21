@@ -3,27 +3,97 @@ import numpy as np
 import warnings   
 import src.map_equation as meq
 
-def build_graph_cache(g: ig.Graph) -> dict:
+def build_incidence_index(g: ig.Graph, edges: np.ndarray) -> dict:
+    """Precompute an efficient lookup structure mapping each
+    node to the indices (into `edges`) of its incident edges,
+    to use instead of calling g.incident(node) repeatedly in the 
+    optimization process.
+
+    Returns a dict with:
+      - "out_idxptr", "out_eids": CSR-style index for outgoing edges
+        (out_eids[out_idxptr[n]:out_idxptr[n+1]] gives edge indices
+        where node n is the source)
+      - "in_idxptr", "in_eids": same, for incoming edges (node n is target)
+    For undirected graphs, "out_*" and "in_*" are identical — every
+    incident edge counts as both, matching g.incident(node) semantics.
+    """
+    N = g.vcount()
+    E = edges.shape[0]
+
+    # outgoing (or all-incident for undirected): 
+    # sort edge ids by source node
+    order_out = np.argsort(edges[:, 0], kind="stable")
+    src_sorted = edges[order_out, 0] # edge array sorted by source node idx
+    out_eids = order_out  # edge indices sorted by source node idx
+
+    # get (left-most) index of where in src_sorted the entries for each
+    # source node n start, so out_idxptr[n] yields the index of the first edge (or 
+    # edge id) in the SORTED array where n is the source node
+    # so out_idxptr[n]:out_idxptr[n+1] is the slice in the sorted array that
+    # yields the edges with n as source node   
+    out_idxptr = np.searchsorted(src_sorted, np.arange(N + 1)) 
+
+    if g.is_directed():
+        # analogously for incoming: sort edge ids by target node
+        order_in = np.argsort(edges[:, 1], kind="stable")
+        trg_sorted = edges[order_in, 1]
+        in_idxptr = np.searchsorted(trg_sorted, np.arange(N + 1))
+        in_eids = order_in
+    else:
+        # undirected: build a symmetric index by
+        # duplicating each edge for both its endpoints.
+        both_src = np.concatenate([edges[:, 0], edges[:, 1]])
+        both_eid = np.concatenate([np.arange(E), np.arange(E)])
+        order_both = np.argsort(both_src, kind="stable")
+        src_sorted = both_src[order_both]
+        out_idxptr = np.searchsorted(src_sorted, np.arange(N + 1))
+        out_eids = both_eid[order_both]
+        in_idxptr, in_eids = out_idxptr, out_eids  # identical for undirected
+
+    return {
+        "out_idxptr": out_idxptr, "out_eids": out_eids,
+        "in_idxptr": in_idxptr, "in_eids": in_eids,
+    }
+
+def build_graph_cache(g: ig.Graph, teleportation="uniform") -> dict:
     """
     Precompute per-graph arrays (edges, weights etc) that stay constant while
     community labels change. This is useful for dealing with huge graphs where
     these computing these becomes really expensive. Needs to be rebuild for each 
     distinct graph object (so once per compression level/induced subgraph)
     """
-    edges = np.array(g.get_edgelist(), dtype=np.int64)
+    edge_list = g.get_edgelist()
+    edges = (np.array(edge_list, dtype=np.int64) if edge_list
+            else np.empty((0, 2), dtype=np.int64)) 
+    # this is a safeguard against graph without edges, which might yield shape issues
+
     weights = np.array(
         g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64)
     )
     cache = {"edges": edges, "weights": weights}
 
     if g.is_directed():
+        # get out strengths
         cache["out_strength"] = np.array(
             g.strength(mode="out", weights="weight" if g.is_weighted() else None)
         )
+        # get sparse adjacency matrix representation
         cache["adj"] = meq.build_sparse_adjacency(g, edges=edges, weights=weights)
+        # get node visit frequencies via pagerank
+        if teleportation == "uniform":
+            cache["p"] = meq.pagerank(cache["adj"])
+        else: # nonuniform
+            cache["p"] = meq.pagerank_nonuniform(cache["adj"])
+
     else:
         cache["out_strength"] = None  # not used in undirected branch
         cache["adj"] = None # dito
+        # get node visit frequencies
+        cache["p"] = np.array(g.strength(weights="weight" if g.is_weighted() else None)) / (2 * np.sum(weights))
+
+
+    # build incidence lookup dict
+    cache["incidence"] = build_incidence_index(g, edges)
 
     return cache
 
@@ -200,7 +270,7 @@ def node_movement_optimization(g,
     L, p, p_mod, exit_data = meq.compute_description_length(
         g, communities, teleportation=teleportation, edges=cache["edges"],
         weights=cache["weights"], out_strength=cache["out_strength"],
-        adj = cache["adj"], returnTerms=True
+        adj=cache["adj"], p=cache["p"], returnTerms=True
     )
 
     if verbose:
@@ -240,6 +310,7 @@ def node_movement_optimization(g,
                     g, communities, p, p_mod, exit_data, n, nbc,
                     edges=cache["edges"], weights=cache["weights"], 
                     out_strength=cache["out_strength"],
+                    incidence_dict=cache["incidence"],
                     teleportation=teleportation, returnTerms=True
                 )
                 if L_new is not None and L_new < L_best: # improvement was made
@@ -268,7 +339,7 @@ def node_movement_optimization(g,
         L, p, p_mod, exit_data = meq.compute_description_length(
             g, communities, teleportation=teleportation, edges=cache["edges"],
             weights=cache["weights"], out_strength=cache["out_strength"],
-            adj = cache["adj"], returnTerms=True
+            adj = cache["adj"], p=cache["p"], returnTerms=True
             )
 
         if verbose:
@@ -325,7 +396,8 @@ def core_search_algorithm(g:ig.Graph, teleportation="uniform", cache=None, verbo
                                                   edges=cache_current["edges"],
                                                   weights=cache_current["weights"],
                                                   out_strength=cache_current["out_strength"],
-                                                  adj = cache_current["adj"]
+                                                  adj = cache_current["adj"],
+                                                  p=cache_current["p"]
                                                   )
     
         # --- Phase 1: optimization via single-node moves ---
@@ -376,7 +448,8 @@ def core_search_algorithm(g:ig.Graph, teleportation="uniform", cache=None, verbo
                                                  edges=cache["edges"],
                                                  weights=cache["weights"], 
                                                  out_strength=cache["out_strength"],
-                                                 adj = cache["adj"]
+                                                 adj = cache["adj"],
+                                                 p=cache["p"]
                                                  )
         
         print(f"\nFinal: {len(np.unique(flat_comms))} communities, "
@@ -481,7 +554,8 @@ def submodule_movement_optimization(g: ig.Graph,
                                               edges=cache["edges"],
                                               weights=cache["weights"],
                                               out_strength=cache["out_strength"],
-                                              adj = cache["adj"]
+                                              adj=cache["adj"],
+                                              p=cache["p"]
                                               )
 
     # Normalise community labels to contiguous 0-indexed integers.
@@ -596,6 +670,7 @@ def submodule_movement_optimization(g: ig.Graph,
                                               weights=cache["weights"],
                                               out_strength=cache["out_strength"],
                                               adj = cache["adj"],
+                                              p=cache["p"],
                                               teleportation=teleportation)
 
     if verbose:
@@ -653,7 +728,8 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
                                                      edges=cache['edges'], 
                                                      weights=cache['weights'], 
                                                      out_strength=cache['out_strength'], 
-                                                     adj = cache['adj'])
+                                                     adj=cache['adj'],
+                                                     p=cache["p"])
             print(f"Starting from description length L = {L_trivial} bits (with trivial parititon)")
 
         comms_initial = core_search_algorithm(g, teleportation=teleportation, cache=cache,
@@ -665,7 +741,8 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
                                                        edges=cache["edges"], 
                                                        weights=cache["weights"],
                                                        out_strength=cache["out_strength"],
-                                                       adj = cache["adj"])
+                                                       adj = cache["adj"],
+                                                       p=cache["p"])
             print(f"Initial partition found by core search algorithm has description length L = {L_initial:.6f} bits")
             print(f"--- Starting refinement process...\n")
 
@@ -679,7 +756,8 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
                                                       edges=cache["edges"], 
                                                       weights=cache["weights"],
                                                       out_strength=cache["out_strength"], 
-                                                      adj = cache["adj"])
+                                                      adj = cache["adj"],
+                                                      p=cache["p"])
             # submodule refinement
             comms_level = submodule_movement_optimization(g, comms_level, 
                                                           teleportation=teleportation,
@@ -695,7 +773,8 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
                                                      edges=cache["edges"], 
                                                      weights=cache["weights"],
                                                      out_strength=cache["out_strength"],
-                                                     adj = cache["adj"])
+                                                     adj = cache["adj"],
+                                                     p=cache["p"])
             if verbose:
                 print(f"--- Refinement: Finished Iteration {i+1}")
                 print(f"        L_before={L_before:.6f}, L_after={L_after:.6f}")

@@ -121,7 +121,7 @@ def compute_exit_flow(g: ig.Graph, communities: list[int], p: np.ndarray, weight
 
 # originally based off of the PageRank Wikipedia, hehe
 # but changed to row-stochastic, and with dangling node handling
-def pagerank(M, tau: float = 0.15, tol: float = 1e-15, maxiter: int = 1e6):
+def pagerank(M, tau: float = 0.15, tol: float = 1e-10, maxiter: int = 1e6):
     """PageRank algorithm with teleportation probability tau. Returns ranking of nodes (pages) in the adjacency matrix.
 
     Parameters
@@ -173,6 +173,7 @@ def compute_description_length(g, communities,
                                weights=None, 
                                out_strength=None, 
                                adj=None,
+                               p=None,
                                tau=0.15, 
                                teleportation="uniform",
                                returnTerms=False,
@@ -214,7 +215,8 @@ def compute_description_length(g, communities,
 
         if teleportation == "uniform":
             # === Uniform recorded teleportation ===
-            p = pagerank(adj, tau=tau)
+            if p is None:
+                p = pagerank(adj, tau=tau)
             p_mod = np.zeros(num_communities)
             np.add.at(p_mod, communities, p)
             exit_flow = compute_exit_flow(g, communities, p,
@@ -235,7 +237,8 @@ def compute_description_length(g, communities,
             
         else:  # nonuniform
             # === Smart unrecorded teleportation ===
-            p = pagerank_nonuniform(adj, tau=tau)
+            if p is None:
+                p = pagerank_nonuniform(adj, tau=tau)
             p_mod = np.zeros(num_communities)
             np.add.at(p_mod, communities, p)
             exit_flow = compute_exit_flow(g, communities, p,
@@ -263,7 +266,8 @@ def compute_description_length(g, communities,
         if weights is None:
             weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
         total_weight_x2 = 2 * np.sum(weights)
-        p = np.array(g.strength(weights="weight" if g.is_weighted() else None)) / total_weight_x2
+        if p is None:
+            p = np.array(g.strength(weights="weight" if g.is_weighted() else None)) / total_weight_x2
         
         p_mod = np.zeros(num_communities)
         np.add.at(p_mod, communities, p)
@@ -299,7 +303,8 @@ def update_exit_weights(g: ig.Graph,
                         comm_src: int, 
                         comm_trg: int,
                         edges=None,
-                        weights=None
+                        weights=None,
+                        incidence_dict=None
                         ) -> np.ndarray:
     """Update exit weights incrementally when a single node moves communities.
     This is more efficient than recomputing from scratch for undirected graphs.
@@ -325,7 +330,12 @@ def update_exit_weights(g: ig.Graph,
     if comm_src == comm_trg:
         return exit_weights_old.copy()
 
-    incident_eids = np.array(g.incident(node), dtype=int)
+    if incidence_dict is None:
+        incident_eids = np.array(g.incident(node), dtype=int)
+    else:
+        ip = incidence_dict["out_idxptr"]  # for undirected, out == in == all-incident
+        incident_eids = incidence_dict["out_eids"][ip[node]:ip[node + 1]]
+
     if edges is None:
         edges = np.array(g.get_edgelist(), dtype=int)
     if weights is None:
@@ -369,7 +379,8 @@ def update_exit_flow(g: ig.Graph,
                      comm_trg: int,
                      edges=None,
                      weights=None,
-                     out_strength=None
+                     out_strength=None,
+                     incidence_dict=None
                      ) -> np.ndarray:
     """Update the community exit flow for a directed graph when one node changes communities.
     This function updates the exit flow incrementally instead of recomputing it from scratch.
@@ -410,8 +421,14 @@ def update_exit_flow(g: ig.Graph,
     node_out_strength = out_strength[node]
     node_p            = p[node]
 
-    out_edge_ids = np.array(g.incident(node, mode="out"), dtype=int)
-    in_edge_ids  = np.array(g.incident(node, mode="in"),  dtype=int)
+    if incidence_dict is None:
+        out_edge_ids = np.array(g.incident(node, mode="out"), dtype=int)
+        in_edge_ids  = np.array(g.incident(node, mode="in"),  dtype=int)
+    else:
+        out_ip = incidence_dict["out_idxptr"]
+        in_ip  = incidence_dict["in_idxptr"]
+        out_edge_ids = incidence_dict["out_eids"][out_ip[node]:out_ip[node + 1]]
+        in_edge_ids  = incidence_dict["in_eids"][in_ip[node]:in_ip[node + 1]]
 
     # remember, for the exit flow of a community we need consider its outgoing links
     # moving the node to another community affects the exit flows of comm_src and comm_trg 
@@ -559,6 +576,7 @@ def update_node_move_description_length(g,
                                         edges=None,
                                         weights=None,
                                         out_strength=None,
+                                        incidence_dict=None,
                                         tau=0.15,
                                         teleportation="uniform",
                                         returnTerms=False,
@@ -619,7 +637,8 @@ def update_node_move_description_length(g,
                                          p_old, exits_old,
                                          node, comm_src, comm_trg,
                                          edges=edges, weights=weights, 
-                                         out_strength=out_strength)
+                                         out_strength=out_strength,
+                                         incidence_dict=incidence_dict)
         q_mod = tau * (N - node_counts) / N * p_mod_new + (1 - tau) * exit_flow_new
     else:
         if weights is None:
@@ -628,7 +647,8 @@ def update_node_move_description_length(g,
         total_weight_x2 = 2 * np.sum(weights)
         exit_weights_new = update_exit_weights(g, communities_old, exits_old, node,
                                                comm_src, comm_trg,
-                                               edges=edges, weights=weights)
+                                               edges=edges, weights=weights,
+                                               incidence_dict=incidence_dict)
         q_mod = exit_weights_new / total_weight_x2
 
     q_sum = np.sum(q_mod)
