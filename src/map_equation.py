@@ -5,7 +5,7 @@ import warnings
 import scipy.sparse as sp
 
 
-def build_sparse_adjacency(g: ig.Graph) -> sp.csr_matrix:
+def build_sparse_adjacency(g: ig.Graph, edges=None, weights=None) -> sp.csr_matrix:
     """Build a sparse (CSR) (weighted) adjacency matrix for a (directed) graph.
 
     This replaces g.get_adjacency(), in order to avoid memory issues when 
@@ -21,10 +21,14 @@ def build_sparse_adjacency(g: ig.Graph) -> sp.csr_matrix:
     if g.ecount() == 0:
         return sp.csr_matrix((N, N))
 
-    edges = np.array(g.get_edgelist(), dtype=np.int64)
-    weights = np.array(
-        g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64)
-    )
+    if edges is None:
+        edges = np.array(g.get_edgelist(), dtype=np.int64)
+
+    if weights is None:
+        weights = np.array(
+            g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64)
+            )
+        
     adj = sp.coo_matrix((weights, (edges[:, 0], edges[:, 1])), shape=(N, N)).tocsr()
     return adj
 
@@ -43,7 +47,7 @@ def safe_xlogx(x):
     return np.where(x > 0.0, safe_x * np.log2(safe_x), 0.0) # set these points manually to 0
 
 
-def compute_exit_weights(g: ig.Graph, communities: list[int]) -> np.ndarray:
+def compute_exit_weights(g: ig.Graph, communities: list[int], weights=None, edges=None) -> np.ndarray:
     """Compute community exit weights for a given undirected graph and community partition.
        Helper function for the description length computation via map equation.
 
@@ -54,11 +58,15 @@ def compute_exit_weights(g: ig.Graph, communities: list[int]) -> np.ndarray:
     Returns:
         np.ndarray: Exit weights for each community.
     """
-    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
+    if weights is None:
+        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
+
+    if edges is None:
+        edges = np.array(g.get_edgelist(), dtype=int) # array of edges
+
     communities = np.array(communities) # community membership list for each node
     exit_weights = np.zeros(max(communities) + 1) # initialise exit weight array
 
-    edges = np.array(g.get_edgelist(), dtype=int) # array of edges
     src= communities[edges[:, 0]] # community of source node for each edge
     trg = communities[edges[:, 1]] # community of target node for each edge
 
@@ -72,7 +80,7 @@ def compute_exit_weights(g: ig.Graph, communities: list[int]) -> np.ndarray:
     return exit_weights
 
 # it's a bit funkier when we're dealing with directed networks:
-def compute_exit_flow(g: ig.Graph, communities: list[int], p: np.ndarray) -> np.ndarray:
+def compute_exit_flow(g: ig.Graph, communities: list[int], p: np.ndarray, weights=None, edges=None, out_strength=None) -> np.ndarray:
     """Compute community exit flow for a given directed graph, community partition, and node visit frequencies.
        Helper function for the description length computation via map equation.
 
@@ -86,9 +94,13 @@ def compute_exit_flow(g: ig.Graph, communities: list[int], p: np.ndarray) -> np.
     """
 
     communities = np.array(communities) # community membership list for each node
-    out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None)) # strength of outgoing links for each node
-    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
-    edges = np.array(g.get_edgelist(), dtype=int) # array of edges
+
+    if out_strength is None:
+        out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None)) # strength of outgoing links for each node
+    if weights is None:
+        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
+    if edges is None:
+        edges = np.array(g.get_edgelist(), dtype=int) # array of edges
 
     src = edges[:, 0] # community of source node for each edge
     trg = edges[:, 1] # community of target node for each edge
@@ -156,9 +168,15 @@ def pagerank(M, tau: float = 0.15, tol: float = 1e-15, maxiter: int = 1e6):
     return p
 
 
-def compute_description_length(g, communities, tau=0.15, 
+def compute_description_length(g, communities,
+                               edges=None,
+                               weights=None, 
+                               out_strength=None, 
+                               adj=None,
+                               tau=0.15, 
                                teleportation="uniform",
-                               returnTerms=False, verbose=False):
+                               returnTerms=False,
+                               verbose=False):
     """Compute the description length of a partition using the map equation.
     
     Args:
@@ -191,14 +209,18 @@ def compute_description_length(g, communities, tau=0.15,
     
     if g.is_directed():
         #adj = np.array(g.get_adjacency(attribute="weight" if g.is_weighted() else None).data, dtype=float)
-        adj = build_sparse_adjacency(g) # for handling large graphs
+        if adj is None:
+            adj = build_sparse_adjacency(g, edges=edges, weights=weights) # for handling large graphs
 
         if teleportation == "uniform":
             # === Uniform recorded teleportation ===
             p = pagerank(adj, tau=tau)
             p_mod = np.zeros(num_communities)
             np.add.at(p_mod, communities, p)
-            exit_flow = compute_exit_flow(g, communities, p)
+            exit_flow = compute_exit_flow(g, communities, p,
+                                          edges=edges,
+                                          weights=weights,
+                                          out_strength=out_strength)
             
             # q_mod includes the teleportation term
             n_mod = np.bincount(communities, minlength=num_communities)
@@ -216,8 +238,14 @@ def compute_description_length(g, communities, tau=0.15,
             p = pagerank_nonuniform(adj, tau=tau)
             p_mod = np.zeros(num_communities)
             np.add.at(p_mod, communities, p)
-            exit_flow = compute_exit_flow(g, communities, p)
-            enter_flow = compute_enter_flow_nonuniform(g, communities, p)
+            exit_flow = compute_exit_flow(g, communities, p,
+                                          edges=edges,
+                                          weights=weights,
+                                          out_strength=out_strength)
+            enter_flow = compute_enter_flow_nonuniform(g, communities, p,
+                                                       edges=edges,
+                                                       weights=weights,
+                                                       out_strength=out_strength)
             
             # asymmetric formula: enter for index, exit for module
             q_enter = enter_flow
@@ -232,14 +260,15 @@ def compute_description_length(g, communities, tau=0.15,
     
     else:
         # === Undirected case — same for both teleportation schemes ===
-        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
+        if weights is None:
+            weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
         total_weight_x2 = 2 * np.sum(weights)
         p = np.array(g.strength(weights="weight" if g.is_weighted() else None)) / total_weight_x2
         
         p_mod = np.zeros(num_communities)
         np.add.at(p_mod, communities, p)
         
-        exit_weights = compute_exit_weights(g, communities)
+        exit_weights = compute_exit_weights(g, communities, edges=edges, weights=weights)
         q_mod = exit_weights / total_weight_x2
         
         q_sum = np.sum(q_mod)
@@ -263,8 +292,15 @@ def compute_description_length(g, communities, tau=0.15,
     
 
 
-def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_old: np.ndarray,
-                        node: int, comm_src: int, comm_trg: int) -> np.ndarray:
+def update_exit_weights(g: ig.Graph, 
+                        communities_old: list[int], 
+                        exit_weights_old: np.ndarray,
+                        node: int, 
+                        comm_src: int, 
+                        comm_trg: int,
+                        edges=None,
+                        weights=None
+                        ) -> np.ndarray:
     """Update exit weights incrementally when a single node moves communities.
     This is more efficient than recomputing from scratch for undirected graphs.
 
@@ -290,17 +326,19 @@ def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_ol
         return exit_weights_old.copy()
 
     incident_eids = np.array(g.incident(node), dtype=int)
-    all_edges     = np.array(g.get_edgelist(), dtype=int)
-    all_weights   = np.array(
-        g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64)
-    )
+    if edges is None:
+        edges = np.array(g.get_edgelist(), dtype=int)
+    if weights is None:
+        weights = np.array(g.es["weight"] if g.is_weighted() 
+                               else np.ones(g.ecount(), dtype=np.float64)
+                               )
 
-    inc_edges   = all_edges[incident_eids]
-    inc_weights = all_weights[incident_eids]
+    inc_edges   = edges[incident_eids]
+    inc_weights = weights[incident_eids]
 
     neighbor_nodes = np.where(inc_edges[:, 0] == node, inc_edges[:, 1], inc_edges[:, 0])
 
-    # KEY FIX
+    # FIXED THE ISSUE HERE
     # Discard self-loops: they are always intra-community and never affect exit
     # weights regardless of which community the node is in.
     not_self    = neighbor_nodes != node
@@ -322,9 +360,17 @@ def update_exit_weights(g: ig.Graph, communities_old: list[int], exit_weights_ol
     return exit_weights_new
 
 
-def update_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray,
+def update_exit_flow(g: ig.Graph, 
+                     communities_old: list[int], 
+                     p: np.ndarray,
                      exit_flow_old: np.ndarray,
-                     node: int, comm_src: int, comm_trg: int) -> np.ndarray:
+                     node: int, 
+                     comm_src: int, 
+                     comm_trg: int,
+                     edges=None,
+                     weights=None,
+                     out_strength=None
+                     ) -> np.ndarray:
     """Update the community exit flow for a directed graph when one node changes communities.
     This function updates the exit flow incrementally instead of recomputing it from scratch.
 
@@ -350,18 +396,20 @@ def update_exit_flow(g: ig.Graph, communities_old: list[int], p: np.ndarray,
     if comm_src == comm_trg:
         return exit_flow_old.copy()
 
-    exit_flow        = np.array(exit_flow_old, copy=True)
-    weights          = np.array(g.es["weight"] if g.is_weighted()
-                                else np.ones(g.ecount(), dtype=np.float64))
-    out_strength     = np.array(g.strength(mode="out",
-                                weights="weight" if g.is_weighted() else None))
-    
+    exit_flow = np.array(exit_flow_old, copy=True)
+    if weights is None:
+        weights = np.array(g.es["weight"] if g.is_weighted()
+                           else np.ones(g.ecount(), dtype=np.float64))
+    if out_strength is None:
+        out_strength = np.array(g.strength(mode="out", weights="weight"
+                                           if g.is_weighted() else None))
+    if edges is None:
+        edges = np.array(g.get_edgelist(), dtype=int)
 
-    # Intentionally includes self-loop weight — keeps flow normalisation correct.
+    # intentionally includes self-loop weight, keeps flow normalisation correct.
     node_out_strength = out_strength[node]
     node_p            = p[node]
 
-    edges        = np.array(g.get_edgelist(), dtype=int)
     out_edge_ids = np.array(g.incident(node, mode="out"), dtype=int)
     in_edge_ids  = np.array(g.incident(node, mode="in"),  dtype=int)
 
@@ -472,12 +520,23 @@ def pagerank_nonuniform(M, tau: float = 0.15, tol: float = 1e-15, maxiter: int =
     return p
 
 
-def compute_enter_flow_nonuniform(g: ig.Graph, communities: list[int], p: np.ndarray) -> np.ndarray:
-    """Rate of flow entering each community via incoming edges from outside."""
+def compute_enter_flow_nonuniform(g: ig.Graph,
+                                  communities: list[int],
+                                  p: np.ndarray,
+                                  edges=None,
+                                  weights=None,
+                                  out_strength=None
+                                  ) -> np.ndarray:
+    """
+        Rate of flow entering each community via incoming edges from outside.
+    """
     communities = np.array(communities)
-    out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None))
-    weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
-    edges = np.array(g.get_edgelist(), dtype=int)
+    if out_strength is None:
+        out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None))
+    if weights is None:
+        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
+    if edges is None:
+        edges = np.array(g.get_edgelist(), dtype=int)
 
     src, trg = edges[:, 0], edges[:, 1]
     src_com, trg_com = communities[src], communities[trg]
@@ -490,10 +549,21 @@ def compute_enter_flow_nonuniform(g: ig.Graph, communities: list[int], p: np.nda
     np.add.at(enter_flow, trg_com[betw], flow[betw])
     return enter_flow
 
-def update_node_move_description_length(g, communities_old, p_old, p_mod_old, exits_old,
-                                         node, comm_trg, tau=0.15,
-                                         teleportation="uniform",
-                                         returnTerms=False, verbose=False):
+def update_node_move_description_length(g, 
+                                        communities_old,
+                                        p_old, 
+                                        p_mod_old, 
+                                        exits_old,
+                                        node, 
+                                        comm_trg, 
+                                        edges=None,
+                                        weights=None,
+                                        out_strength=None,
+                                        tau=0.15,
+                                        teleportation="uniform",
+                                        returnTerms=False,
+                                        verbose=False
+                                        ):
     """Compute the change in description length if a single node is moved.
 
     Args:
@@ -518,12 +588,16 @@ def update_node_move_description_length(g, communities_old, p_old, p_mod_old, ex
         if returnTerms:
             L, p_new, p_mod_new, exit_data = compute_description_length(
                 g, communities_new, tau=tau, teleportation="nonuniform",
+                edges=edges, weights=weights, out_strength=out_strength,
                 returnTerms=True, verbose=verbose
             )
             return L, communities_new, p_mod_new, exit_data
         else:
             return compute_description_length(g, communities_new, tau=tau,
                                               teleportation="nonuniform",
+                                              edges=edges, 
+                                              weights=weights,
+                                              out_strength=out_strength,
                                               verbose=verbose)
 
     # === Uniform path: existing incremental update ===
@@ -541,12 +615,20 @@ def update_node_move_description_length(g, communities_old, p_old, p_mod_old, ex
 
     if g.is_directed():
         node_counts = np.bincount(communities_new, minlength=num_communities)
-        exit_flow_new = update_exit_flow(g, communities_old, p_old, exits_old, node, comm_src, comm_trg)
+        exit_flow_new = update_exit_flow(g, communities_old,
+                                         p_old, exits_old,
+                                         node, comm_src, comm_trg,
+                                         edges=edges, weights=weights, 
+                                         out_strength=out_strength)
         q_mod = tau * (N - node_counts) / N * p_mod_new + (1 - tau) * exit_flow_new
     else:
-        weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
+        if weights is None:
+            weights = np.array(g.es["weight"] if g.is_weighted()
+                               else np.ones(g.ecount(), dtype=np.float64))
         total_weight_x2 = 2 * np.sum(weights)
-        exit_weights_new = update_exit_weights(g, communities_old, exits_old, node, comm_src, comm_trg)
+        exit_weights_new = update_exit_weights(g, communities_old, exits_old, node,
+                                               comm_src, comm_trg,
+                                               edges=edges, weights=weights)
         q_mod = exit_weights_new / total_weight_x2
 
     q_sum = np.sum(q_mod)

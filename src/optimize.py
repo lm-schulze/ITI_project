@@ -3,8 +3,34 @@ import numpy as np
 import warnings   
 import src.map_equation as meq
 
+def build_graph_cache(g: ig.Graph) -> dict:
+    """
+    Precompute per-graph arrays (edges, weights etc) that stay constant while
+    community labels change. This is useful for dealing with huge graphs where
+    these computing these becomes really expensive. Needs to be rebuild for each 
+    distinct graph object (so once per compression level/induced subgraph)
+    """
+    edges = np.array(g.get_edgelist(), dtype=np.int64)
+    weights = np.array(
+        g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64)
+    )
+    cache = {"edges": edges, "weights": weights}
 
-def compress_network(g: ig.Graph, communities: list[int], verbose=False) -> tuple:
+    if g.is_directed():
+        cache["out_strength"] = np.array(
+            g.strength(mode="out", weights="weight" if g.is_weighted() else None)
+        )
+        cache["adj"] = meq.build_sparse_adjacency(g, edges=edges, weights=weights)
+    else:
+        cache["out_strength"] = None  # not used in undirected branch
+        cache["adj"] = None # dito
+
+    return cache
+
+
+def compress_network(g: ig.Graph, communities: list[int], 
+                     edges=None, weights=None, verbose=False
+                     ) -> tuple:
     """
     Implements Phase 2 of the infomap search algorithm. Compresses the network by
     collapsing each community into a single super-node and aggregating edge weights,
@@ -50,11 +76,14 @@ def compress_network(g: ig.Graph, communities: list[int], verbose=False) -> tupl
     # We'll basically build a graph with a number of nodes = number of communities
     # and then insert the correctly aggregated edges that we compute here
     if g.ecount() > 0: # if we have edges get the weights
-        weights = np.array(
-            g.es["weight"] if g.is_weighted() else np.ones(g.ecount()),
-            dtype=np.float64
-        )
-        edges = np.array(g.get_edgelist(), dtype=np.int64) # build edgelist
+        if weights is None:
+            weights = np.array(
+                g.es["weight"] if g.is_weighted() else np.ones(g.ecount()),
+                dtype=np.float64
+            )
+
+        if edges is None:
+            edges = np.array(g.get_edgelist(), dtype=np.int64) # build edgelist
 
         # map each start/endpoint to its compressed-graph node index
         # so basically instead of (starting node, ending node) we now have
@@ -114,7 +143,12 @@ def compress_network(g: ig.Graph, communities: list[int], verbose=False) -> tupl
     return g_compressed, unique_communities.copy()
 
 
-def node_movement_optimization(g, initial_communities=None, teleportation="uniform", returnTerms=False, verbose=False):
+def node_movement_optimization(g, 
+                               initial_communities=None, 
+                               teleportation="uniform",
+                               cache=None, 
+                               returnTerms=False, 
+                               verbose=False):
     """Phase 1 of the search algorithm. Iteratively moves each node to the
     neighbouring community that minimizes L, until no further improvement.
 
@@ -158,9 +192,15 @@ def node_movement_optimization(g, initial_communities=None, teleportation="unifo
         if verbose:
             print("Initialising node movement optimization with the given initial community assignments.")
         communities = initial_communities.copy()
+
+    # build graph cache to avoid recomputing edges/weights later:
+    if cache is None:
+        cache = build_graph_cache(g)
         
     L, p, p_mod, exit_data = meq.compute_description_length(
-        g, communities, teleportation=teleportation, returnTerms=True
+        g, communities, teleportation=teleportation, edges=cache["edges"],
+        weights=cache["weights"], out_strength=cache["out_strength"],
+        adj = cache["adj"], returnTerms=True
     )
 
     if verbose:
@@ -198,6 +238,8 @@ def node_movement_optimization(g, initial_communities=None, teleportation="unifo
             for nbc in comms_to_test:
                 L_new, communities_new, p_mod_new, exit_data_new = meq.update_node_move_description_length(
                     g, communities, p, p_mod, exit_data, n, nbc,
+                    edges=cache["edges"], weights=cache["weights"], 
+                    out_strength=cache["out_strength"],
                     teleportation=teleportation, returnTerms=True
                 )
                 if L_new is not None and L_new < L_best: # improvement was made
@@ -221,11 +263,13 @@ def node_movement_optimization(g, initial_communities=None, teleportation="unifo
 
         # End-of-sweep: relabel to compact arrays, then reseed L/p/p_mod/exit_data
         # from scratch so all four are consistent with each other before the next sweep
-        # (or before returning). This is the single point where relabelling happens.
+        # (or before returning). This is the only point where relabelling happens.
         _, communities = np.unique(communities, return_inverse=True)
         L, p, p_mod, exit_data = meq.compute_description_length(
-            g, communities, teleportation=teleportation, returnTerms=True
-        )
+            g, communities, teleportation=teleportation, edges=cache["edges"],
+            weights=cache["weights"], out_strength=cache["out_strength"],
+            adj = cache["adj"], returnTerms=True
+            )
 
         if verbose:
             print(f"Current best description length: {L}")
@@ -245,7 +289,7 @@ def node_movement_optimization(g, initial_communities=None, teleportation="unifo
         return communities
     
 
-def core_search_algorithm(g:ig.Graph, teleportation="uniform", verbose=False):
+def core_search_algorithm(g:ig.Graph, teleportation="uniform", cache=None, verbose=False):
     """Runs core algorithm of the infomap community partition search algorithm, without any
     refinement steps. Follows the description in "The map equation" (M. Rosvall, D. Axelsson, and C.T. Bergstrom, 2009).
     Alternates between node-movement optimization and network compression until no further improvements can be made.
@@ -260,8 +304,12 @@ def core_search_algorithm(g:ig.Graph, teleportation="uniform", verbose=False):
     N = g.vcount() # number of nodes in graph
     flat_comms = np.arange(N, dtype=int) # we'll use this to track how each node in the og graph
     # maps to the supernodes of the current compressed graph
+    # build graph cache if not given as argument
+    if cache is None:
+        cache = build_graph_cache(g) # graph cache
 
     g_current = g 
+    cache_current = cache.copy() # copy so the original graph cache isn't altered
     level = 0 # tracking the compression depth
 
     # start with a loop that repeats as long as we still have improvements:
@@ -271,10 +319,21 @@ def core_search_algorithm(g:ig.Graph, teleportation="uniform", verbose=False):
             print(f"\n--- Level {level} ------------------------------")
             print(f"    Current Graph: {n_current} nodes, {g_current.ecount()} edges")
 
-        L_before = meq.compute_description_length(g_current, np.arange(n_current), teleportation=teleportation)
+        L_before = meq.compute_description_length(g_current, 
+                                                  np.arange(n_current), 
+                                                  teleportation=teleportation,
+                                                  edges=cache_current["edges"],
+                                                  weights=cache_current["weights"],
+                                                  out_strength=cache_current["out_strength"],
+                                                  adj = cache_current["adj"]
+                                                  )
     
         # --- Phase 1: optimization via single-node moves ---
-        comms_level, L_after, _, _ = node_movement_optimization(g_current, teleportation=teleportation, returnTerms=True, verbose=verbose)
+        comms_level, L_after, _, _ = node_movement_optimization(g_current, 
+                                                                teleportation=teleportation, 
+                                                                returnTerms=True, 
+                                                                cache=cache_current,
+                                                                verbose=verbose)
         n_communities = int(np.max(comms_level)) + 1 # works bc labels should be 0 indexed & contiguous
 
         if verbose:
@@ -295,6 +354,8 @@ def core_search_algorithm(g:ig.Graph, teleportation="uniform", verbose=False):
         
         # --- Phase 2: Network compression ---
         g_current, _ = compress_network(g_current, comms_level, verbose=verbose)
+        cache_current = build_graph_cache(g_current) # new graph cache
+
         if verbose: 
             print(f"    Compressed network has description length L = {meq.compute_description_length(g_current, range(n_communities))}")
         level += 1
@@ -309,7 +370,15 @@ def core_search_algorithm(g:ig.Graph, teleportation="uniform", verbose=False):
     assert len(flat_comms) == g.vcount(), "Error: result length doesn't match number of nodes in graph in recursive submodule search result."
     
     if verbose:
-        L_final = meq.compute_description_length(g, flat_comms.tolist(), teleportation=teleportation)
+        L_final = meq.compute_description_length(g,
+                                                 flat_comms.tolist(), 
+                                                 teleportation=teleportation,
+                                                 edges=cache["edges"],
+                                                 weights=cache["weights"], 
+                                                 out_strength=cache["out_strength"],
+                                                 adj = cache["adj"]
+                                                 )
+        
         print(f"\nFinal: {len(np.unique(flat_comms))} communities, "
               f"L = {L_final:.6f} bits")
 
@@ -333,7 +402,8 @@ def search_submodules_with_recursion(g, teleportation="uniform", verbose=False):
             print(f"Base case reached with singleton node (N={N}). Stopping recursion.")
         return np.zeros(N, dtype=int)
     
-    comms = np.asarray(core_search_algorithm(g, verbose=verbose, teleportation=teleportation), dtype=int)
+    comms = np.asarray(core_search_algorithm(g, verbose=verbose, teleportation=teleportation),
+                       dtype=int)
     unique_comms = np.unique(comms)
     n_comms = len(unique_comms)
 
@@ -361,7 +431,9 @@ def search_submodules_with_recursion(g, teleportation="uniform", verbose=False):
             continue
 
         subgraph = g.induced_subgraph(nodes)
-        sub_comms = search_submodules_with_recursion(subgraph, teleportation=teleportation, verbose=verbose)
+        sub_comms = search_submodules_with_recursion(subgraph, 
+                                                     teleportation=teleportation, 
+                                                     verbose=verbose)
 
         for s in np.unique(sub_comms):
             result[nodes[sub_comms == s]] = next_label
@@ -373,7 +445,12 @@ def search_submodules_with_recursion(g, teleportation="uniform", verbose=False):
 
     return result
 
-def submodule_movement_optimization(g: ig.Graph, communities: list[int]=None, teleportation="uniform", verbose=False) -> np.ndarray:
+def submodule_movement_optimization(g: ig.Graph, 
+                                    communities: list[int]=None, 
+                                    teleportation="uniform",
+                                    cache=None, 
+                                    verbose=False
+                                    ) -> np.ndarray:
     """Refine a community partition via submodule movements:
     1. Take subgraphs corresponding to each module and run node-movement optimization to get 
         submodules
@@ -389,15 +466,23 @@ def submodule_movement_optimization(g: ig.Graph, communities: list[int]=None, te
     Returns:
         np.ndarray: Refined community assignment for every node of g.
     """
-    
+    # build graph cache
+    if cache is None:
+        cache = build_graph_cache(g)
+
     if communities is None:
         if verbose:
             print("No initial partition provided, running core search algorithm first.")
-        communities = core_search_algorithm(g, teleportation=teleportation, verbose=verbose)
+        communities = core_search_algorithm(g, teleportation=teleportation, 
+                                            cache=cache, verbose=verbose)
 
     communities = np.array(communities, dtype=int)
-    L_before = meq.compute_description_length(g, communities, teleportation=teleportation)
-
+    L_before = meq.compute_description_length(g, communities, teleportation=teleportation,
+                                              edges=cache["edges"],
+                                              weights=cache["weights"],
+                                              out_strength=cache["out_strength"],
+                                              adj = cache["adj"]
+                                              )
 
     # Normalise community labels to contiguous 0-indexed integers.
     unique_comms = np.unique(communities)          # sorted unique labels
@@ -474,7 +559,10 @@ def submodule_movement_optimization(g: ig.Graph, communities: list[int]=None, te
 
     # Network compression: each supernode corresponds to one submodule.
     # also returns unique submodule labels to allow reconstruction of node assignments
-    g_compressed, unique_submodule_labels = compress_network(g, global_submodule, verbose=verbose)
+    g_compressed, unique_submodule_labels = compress_network(g, global_submodule, 
+                                                             edges=cache["edges"],
+                                                             weights=cache["weights"],
+                                                             verbose=verbose)
     
     # unique_submodule_labels[i] is the global submodule label of compressed node i,
     # so indexing submodule_to_parent with it gives the parent module index for each compressed node.
@@ -489,10 +577,10 @@ def submodule_movement_optimization(g: ig.Graph, communities: list[int]=None, te
     # so each compressed node (submodule) is initially assigned to its parent module.
     final_compressed_comms = np.array(
         node_movement_optimization(g_compressed,
-                                       initial_communities=initial_compressed_comms,
-                                       teleportation=teleportation,
-                                       verbose=verbose,
-                                       ),
+                                   initial_communities=initial_compressed_comms,
+                                   teleportation=teleportation,
+                                   verbose=verbose
+                                   ),
         dtype=int,
     )
 
@@ -503,7 +591,12 @@ def submodule_movement_optimization(g: ig.Graph, communities: list[int]=None, te
     # map the refined partition back to og nodes
     compressed_node_idx = np.searchsorted(unique_submodule_labels, global_submodule)
     final_communities   = final_compressed_comms[compressed_node_idx]
-    L_after  = meq.compute_description_length(g, final_communities, teleportation=teleportation)
+    L_after  = meq.compute_description_length(g, final_communities, 
+                                              edges=cache["edges"],
+                                              weights=cache["weights"],
+                                              out_strength=cache["out_strength"],
+                                              adj = cache["adj"],
+                                              teleportation=teleportation)
 
     if verbose:
         n_final = len(np.unique(final_communities))
@@ -514,7 +607,7 @@ def submodule_movement_optimization(g: ig.Graph, communities: list[int]=None, te
     assert set(final_communities) == set(range(max(final_communities)+1)), "Error: non-contiguous or non-0-indexed labels in recursive submodule search result."
     assert len(final_communities) == g.vcount(), "Error: result length doesn't match number of nodes in graph in recursive submodule search result."
 
-    # one last check to be super sure to only accept improvments
+    # one last check to be super sure to only accept improvements
     if L_after < L_before:
         return final_communities
     else:
@@ -523,18 +616,20 @@ def submodule_movement_optimization(g: ig.Graph, communities: list[int]=None, te
 
     
 def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100, teleportation="uniform", verbose:bool=False):
-    """Find community partition for a given network via a greedy search algorithm minimizing the description length.
-    Performs num_restart independent searches and returns the partition with the lowest description length. Optimization consists of
+    """Find community partition for a given network via a greedy search algorithm minimizing 
+    the description length. Performs num_restart independent searches and returns the partition 
+    with the lowest description length. Optimization consists of
     1. Running the greedy core search algorithm
-    2. Iterating submodule movement refinement and single-node movement refinement of the core result until no improvements can be
-       achieved or max_iter iterations have been reached.
-
+    2. Iterating submodule movement refinement and single-node movement refinement of the core
+        result until no improvements can be achieved or max_iter iterations have been reached.
 
     Args:
         g (ig.Graph): Input graph. Supports directed/undirected and weighted/unweighted.
-        num_restarts (int, optional): Number of independent restarts of the search process. Defaults to 10.
+        num_restarts (int, optional): Number of independent restarts of the search process. 
+                Defaults to 10.
         max_iter (int, optional): Maximum number of refinement iterations. Defaults to 100.
-        teleportation (str, optional): Which teleportation scheme to use for the Infomap description length computation. Must be "uniform" or "nonuniform". Defaults to "uniform".
+        teleportation (str, optional): Which teleportation scheme to use for the Infomap description
+                length computation. Must be "uniform" or "nonuniform". Defaults to "uniform".
         verbose (bool, optional): Whether to print verbose output for debugging. Defaults to False.
 
     Returns:
@@ -542,6 +637,7 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
     """
 
     N = g.vcount() # number of nodes in graph
+    cache = build_graph_cache(g)
     if verbose:
         print(f"--- Running community search ---------------------------------------")
         print(f"Input Graph: {N} nodes, {g.ecount()} edges")
@@ -552,12 +648,24 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
     for j in range(num_restarts): # number of independent runs
         if verbose:
             print(f"\n--- Run {j+1}/{num_restarts}:  Starting community partition search... -------")
-            print(f"Starting from description length L = {meq.compute_description_length(g, np.arange(N), teleportation=teleportation)} bits (with trivial parititon)")
+            L_trivial = meq.compute_description_length(g, np.arange(N), 
+                                                     teleportation=teleportation, 
+                                                     edges=cache['edges'], 
+                                                     weights=cache['weights'], 
+                                                     out_strength=cache['out_strength'], 
+                                                     adj = cache['adj'])
+            print(f"Starting from description length L = {L_trivial} bits (with trivial parititon)")
 
-        comms_initial = core_search_algorithm(g, teleportation=teleportation, verbose=verbose) # runs core optimization
+        comms_initial = core_search_algorithm(g, teleportation=teleportation, cache=cache,
+                                              verbose=verbose) # runs core optimization
 
         if verbose:
-            L_initial = meq.compute_description_length(g, comms_initial, teleportation=teleportation)
+            L_initial = meq.compute_description_length(g, comms_initial,
+                                                       teleportation=teleportation,
+                                                       edges=cache["edges"], 
+                                                       weights=cache["weights"],
+                                                       out_strength=cache["out_strength"],
+                                                       adj = cache["adj"])
             print(f"Initial partition found by core search algorithm has description length L = {L_initial:.6f} bits")
             print(f"--- Starting refinement process...\n")
 
@@ -566,12 +674,28 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
         for i in range(max_iter):
             if verbose:
                 print(f"\n--- Refinement: Starting Iteration {i+1}")
-            L_before = meq.compute_description_length(g, comms_level, teleportation=teleportation)
+            L_before = meq.compute_description_length(g, comms_level, 
+                                                      teleportation=teleportation,
+                                                      edges=cache["edges"], 
+                                                      weights=cache["weights"],
+                                                      out_strength=cache["out_strength"], 
+                                                      adj = cache["adj"])
             # submodule refinement
-            comms_level = submodule_movement_optimization(g, comms_level, teleportation=teleportation, verbose=verbose)
+            comms_level = submodule_movement_optimization(g, comms_level, 
+                                                          teleportation=teleportation,
+                                                          cache=cache, 
+                                                          verbose=verbose)
             # single-node refinements
-            comms_level = node_movement_optimization(g, comms_level, teleportation=teleportation, verbose=verbose)
-            L_after = meq.compute_description_length(g, comms_level, teleportation=teleportation)
+            comms_level = node_movement_optimization(g, comms_level, 
+                                                     teleportation=teleportation, 
+                                                     cache=cache,
+                                                     verbose=verbose)
+            L_after = meq.compute_description_length(g, comms_level, 
+                                                     teleportation=teleportation,
+                                                     edges=cache["edges"], 
+                                                     weights=cache["weights"],
+                                                     out_strength=cache["out_strength"],
+                                                     adj = cache["adj"])
             if verbose:
                 print(f"--- Refinement: Finished Iteration {i+1}")
                 print(f"        L_before={L_before:.6f}, L_after={L_after:.6f}")
