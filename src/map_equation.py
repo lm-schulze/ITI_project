@@ -3,6 +3,7 @@ import igraph as ig
 import numpy as np
 import warnings
 import scipy.sparse as sp
+import numba
 
 
 def build_sparse_adjacency(g: ig.Graph, edges=None, weights=None) -> sp.csr_matrix:
@@ -34,6 +35,29 @@ def build_sparse_adjacency(g: ig.Graph, edges=None, weights=None) -> sp.csr_matr
 
 # compute x*log2(x) and safely handle log(0) issues:
 # by safely handle I mean just set it to zero
+# split up the scalar and array case for numba
+@numba.njit(cache=True)
+def _safe_xlogx_scalar(x):
+    if x > 0.0:
+        return x * np.log2(x)
+    return 0.0
+
+
+@numba.njit(cache=True)
+def _safe_xlogx_arr(x):
+    out = np.empty_like(x)
+    for i in range(x.shape[0]): # we're working with numba so the for loop is actually fine :D
+        xi = x[i]
+        if xi > 0.0:
+            out[i] = xi * np.log2(xi)
+        else:
+            out[i] = 0.0
+    return out
+
+
+# compute x*log2(x) and safely handle log(0) issues:
+# by safely handle I mean just set it to zero
+# now just a wrapper for the numba versions :D
 def safe_xlogx(x):
     """Compute x*log2(x) safely, setting log(0) to zero.
 
@@ -43,8 +67,10 @@ def safe_xlogx(x):
     Returns:
         x*log2(x) for x > 0, and 0 for x <= 0
     """
-    safe_x = np.where(x > 0.0, x, 1.0)   # replace 0s with 1 to avoid that pesky Divide By 0 issue
-    return np.where(x > 0.0, safe_x * np.log2(safe_x), 0.0) # set these points manually to 0
+    if np.isscalar(x):
+        return _safe_xlogx_scalar(float(x))
+    x = np.asarray(x, dtype=np.float64)
+    return _safe_xlogx_arr(x)
 
 
 def compute_exit_weights(g: ig.Graph, communities: list[int], weights=None, edges=None) -> np.ndarray:
@@ -64,7 +90,7 @@ def compute_exit_weights(g: ig.Graph, communities: list[int], weights=None, edge
     if edges is None:
         edges = np.array(g.get_edgelist(), dtype=int) # array of edges
 
-    communities = np.array(communities) # community membership list for each node
+    communities = np.asarray(communities) # community membership list for each node
     exit_weights = np.zeros(max(communities) + 1) # initialise exit weight array
 
     src= communities[edges[:, 0]] # community of source node for each edge
@@ -93,7 +119,7 @@ def compute_exit_flow(g: ig.Graph, communities: list[int], p: np.ndarray, weight
         np.ndarray: Exit flow for each community.
     """
 
-    communities = np.array(communities) # community membership list for each node
+    communities = np.asarray(communities) # community membership list for each node
 
     if out_strength is None:
         out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None)) # strength of outgoing links for each node
@@ -224,7 +250,7 @@ def compute_enter_flow_nonuniform(g: ig.Graph,
     """
         Rate of flow entering each community via incoming edges from outside.
     """
-    communities = np.array(communities)
+    communities = np.asarray(communities)
     if out_strength is None:
         out_strength = np.array(g.strength(mode="out", weights="weight" if g.is_weighted() else None))
     if weights is None:
@@ -269,11 +295,10 @@ def compute_description_length(g, communities,
     if teleportation not in ("uniform", "nonuniform"):
         raise ValueError(f"teleportation must be 'uniform' or 'nonuniform', got {teleportation!r}")
     
-    communities = np.array(communities)
+    communities = np.asarray(communities)
 
     # relabel just in case for 0-indexed, contiguous labels
-
-    _, communities = np.unique(np.array(communities), return_inverse=True)
+    _, communities = np.unique(communities, return_inverse=True)
     num_communities = int(communities.max()) + 1 
     N = g.vcount()
 
@@ -371,6 +396,50 @@ def compute_description_length(g, communities,
         return L
     
 
+# seperate the core part of the update exit weights mechanism that 
+# numba can work with from the part working with types numba cannot handle
+# i.e. all the igraph stuff, or the incidence dict
+
+@numba.njit(cache=True)
+def _update_exit_weights_core(communities, exit_weights_old, node, node_idx, comm_src, comm_trg,
+                              edges, weights, out_eids, out_idxptr):
+    """Numba-jitted arithmetic core for update_exit_weights.
+
+    Loops directly over the node's incident edges via the CSR-style
+    incidence index (out_eids/out_idxptr). Self-loops (neighbor == node)
+    are skipped inline..
+    """
+    start = out_idxptr[node_idx]
+    end = out_idxptr[node_idx + 1]
+
+    total_degree = 0.0
+    W_src = 0.0
+    W_trg = 0.0
+
+    for k in range(start, end):
+        eid = out_eids[k]
+        a = edges[eid, 0]
+        b = edges[eid, 1]
+        neighbor = b if a == node else a
+        if neighbor == node:  # self-loop: never crosses a community boundary, skip
+            continue
+        w = weights[eid]
+        total_degree += w
+        nc = communities[neighbor]
+        if nc == comm_src:
+            W_src += w
+        elif nc == comm_trg:
+            W_trg += w
+
+    delta_src = 2.0 * W_src - total_degree
+    delta_trg = total_degree - 2.0 * W_trg
+
+    exit_weights_new = exit_weights_old.copy()
+    exit_weights_new[comm_src] += delta_src
+    exit_weights_new[comm_trg] += delta_trg
+    return exit_weights_new
+
+    
 def update_exit_weights(g: ig.Graph, 
                         communities_old: list[int], 
                         exit_weights_old: np.ndarray,
@@ -405,11 +474,14 @@ def update_exit_weights(g: ig.Graph,
     if comm_src == comm_trg:
         return exit_weights_old.copy()
 
-    if incidence_dict is None:
+    if incidence_dict is None: # this shouldn't happen in the optimization, ideally
         incident_eids = np.array(g.incident(node), dtype=int)
+        ip = np.array([0, len(incident_eids)], dtype=np.int64)
+        node_idx = 0
     else:
         ip = incidence_dict["out_idxptr"]  # for undirected, out == in == all-incident
-        incident_eids = incidence_dict["out_eids"][ip[node]:ip[node + 1]]
+        incident_eids = incidence_dict["out_eids"]
+        node_idx = node
 
     if edges is None:
         edges = np.array(g.get_edgelist(), dtype=int)
@@ -417,32 +489,80 @@ def update_exit_weights(g: ig.Graph,
         weights = np.array(g.es["weight"] if g.is_weighted() 
                                else np.ones(g.ecount(), dtype=np.float64)
                                )
+    # calls the numba-adjusted core function
+    return _update_exit_weights_core(
+            communities.astype(np.int64), exit_weights_old, node, node_idx,
+            comm_src, comm_trg, edges, weights, incident_eids, ip
+        )
 
-    inc_edges   = edges[incident_eids]
-    inc_weights = weights[incident_eids]
 
-    neighbor_nodes = np.where(inc_edges[:, 0] == node, inc_edges[:, 1], inc_edges[:, 0])
+@numba.njit(cache=True)
+def _update_exit_flow_core(communities, p, exit_flow_old, node, node_idx, comm_src, comm_trg,
+                           edges, weights, out_strength,
+                           out_eids, out_idxptr, in_eids, in_idxptr):
+    """Numba-jitted arithmetic core for update_exit_flow.
+    """
+    exit_flow = exit_flow_old.copy()
 
-    # FIXED THE ISSUE HERE
-    # Discard self-loops: they are always intra-community and never affect exit
-    # weights regardless of which community the node is in.
-    not_self    = neighbor_nodes != node
-    neighbor_nodes = neighbor_nodes[not_self]
-    inc_weights    = inc_weights[not_self]
+    node_out_strength = out_strength[node]  # includes self-loop weight, as in the original
+    #node_out_strength_safe = node_out_strength if node_out_strength > 0.0 else 1.0
+    node_p = p[node]
 
-    neighbor_comms = communities[neighbor_nodes]
-    total_degree   = np.sum(inc_weights)          # non-self-loop degree only
+    # --- outgoing edges from node ---
+    # remember, for the exit flow of a community we need consider its outgoing links
+    # moving the node to another community affects the exit flows of comm_src and comm_trg 
+    # for the other communities the assignment of node doesn't matter because it's external 
+    # either way, so it contributes to the exit flow the same way as before
 
-    W_src = np.sum(inc_weights[neighbor_comms == comm_src])
-    W_trg = np.sum(inc_weights[neighbor_comms == comm_trg])
+    out_start = out_idxptr[node_idx]
+    out_end = out_idxptr[node_idx + 1]
 
-    delta_src = 2 * W_src - total_degree          # now correct for self-loop nodes
-    delta_trg = total_degree - 2 * W_trg          # now correct for self-loop nodes
+    old_exit = 0.0
+    new_exit = 0.0
+    for k in range(out_start, out_end):
+        eid = out_eids[k]
+        trg = edges[eid, 1]
+        if trg == node:  # self-loop, never crosses a community boundary
+            continue
+        trg_com = communities[trg]
+        w = weights[eid]
+        flow = node_p * w / node_out_strength # no clue how a divide by 0 could have happened here, but it did :((
+        if trg_com != comm_src:
+            old_exit += flow
+        if trg_com != comm_trg:
+            new_exit += flow
 
-    exit_weights_new = exit_weights_old.copy()
-    exit_weights_new[comm_src] += delta_src
-    exit_weights_new[comm_trg] += delta_trg
-    return exit_weights_new
+    exit_flow[comm_src] -= old_exit
+    exit_flow[comm_trg] += new_exit
+
+    # --- incoming edges into node ---
+    # Update exit flow for incoming edges into the moved node from other nodes.
+    # Only sources from comm_src or comm_trg can change whether they are external.
+    # For incoming links from other communities it doesn't matter, as they will be external either way
+    in_start = in_idxptr[node_idx]
+    in_end = in_idxptr[node_idx + 1]
+
+    add_to_src = 0.0
+    sub_from_trg = 0.0
+    for k in range(in_start, in_end):
+        eid = in_eids[k]
+        src = edges[eid, 0]
+        if src == node:  # self-loop, skip
+            continue
+        w = weights[eid]
+        src_out_strength = out_strength[src]
+        src_out_strength_safe = src_out_strength if src_out_strength > 0.0 else 1.0
+        flow_in = p[src] * w / src_out_strength_safe
+        src_com = communities[src]
+        if src_com == comm_src:
+            add_to_src += flow_in
+        elif src_com == comm_trg:
+            sub_from_trg += flow_in
+
+    exit_flow[comm_src] += add_to_src
+    exit_flow[comm_trg] -= sub_from_trg
+
+    return exit_flow
 
 
 def update_exit_flow(g: ig.Graph, 
@@ -482,7 +602,6 @@ def update_exit_flow(g: ig.Graph,
     if comm_src == comm_trg:
         return exit_flow_old.copy()
 
-    exit_flow = np.array(exit_flow_old, copy=True)
     if weights is None:
         weights = np.array(g.es["weight"] if g.is_weighted()
                            else np.ones(g.ecount(), dtype=np.float64))
@@ -492,78 +611,24 @@ def update_exit_flow(g: ig.Graph,
     if edges is None:
         edges = np.array(g.get_edgelist(), dtype=int)
 
-    # intentionally includes self-loop weight, keeps flow normalisation correct.
-    node_out_strength = out_strength[node]
-    node_p            = p[node]
-
     if incidence_dict is None:
-        out_edge_ids = np.array(g.incident(node, mode="out"), dtype=int)
-        in_edge_ids  = np.array(g.incident(node, mode="in"),  dtype=int)
+        out_eids = np.array(g.incident(node, mode="out"), dtype=np.int64)
+        in_eids  = np.array(g.incident(node, mode="in"),  dtype=np.int64)
+        out_idxptr = np.array([0, len(out_eids)], dtype=np.int64)
+        in_idxptr = np.array([0, len(in_eids)], dtype=np.int64)
+        node_idx = 0
     else:
-        out_ip = incidence_dict["out_idxptr"]
-        in_ip  = incidence_dict["in_idxptr"]
-        out_edge_ids = incidence_dict["out_eids"][out_ip[node]:out_ip[node + 1]]
-        in_edge_ids  = incidence_dict["in_eids"][in_ip[node]:in_ip[node + 1]]
+        out_idxptr = incidence_dict["out_idxptr"]
+        out_eids = incidence_dict["out_eids"]
+        in_idxptr = incidence_dict["in_idxptr"]
+        in_eids = incidence_dict["in_eids"]
+        node_idx = node
 
-    # remember, for the exit flow of a community we need consider its outgoing links
-    # moving the node to another community affects the exit flows of comm_src and comm_trg 
-    # for the other communities the assignment of node doesn't matter because it's external either way
-    # so it contributes to the exit flow the same way as before
-
-    # Update exit flow for outgoing edges from the moved node.
-    if out_edge_ids.size > 0:
-        out_edges = edges[out_edge_ids]
-        trg_all   = out_edges[:, 1]
-        w_all     = weights[out_edge_ids]
-
-        # KEY FIX: drop the self-loop from the edge list.
-        # Without this, the self-loop target carries communities[node] = comm_src,
-        # so trg_com != comm_trg is True and it inflates new_exit / exit_flow[comm_trg].
-        not_self = trg_all != node
-        trg      = trg_all[not_self]
-        w_out    = w_all[not_self]
-
-        if trg.size > 0:
-            trg_com  = communities[trg]
-            # node_out_strength keeps the self-loop weight: correct normalisation.
-            flow     = node_p * w_out / node_out_strength
-
-            old_exit = np.sum(flow[trg_com != comm_src])
-            new_exit = np.sum(flow[trg_com != comm_trg])
-            exit_flow[comm_src] -= old_exit
-            exit_flow[comm_trg] += new_exit
-
-    # Update exit flow for incoming edges into the moved node from other nodes.
-    # Only sources from comm_src or comm_trg can change whether they are external.
-    # For incoming links from other communities it doesn't matter, as they will be external either way
-    if in_edge_ids.size > 0:
-        in_edges = edges[in_edge_ids]
-        src_all  = in_edges[:, 0]
-        w_all    = weights[in_edge_ids]
-
-        # KEY FIX: drop the self-loop from the edge list.
-        # Without this, src == node has src_com == comm_src, so mask_src is True
-        # and the self-loop flow is wrongly added to exit_flow[comm_src].
-        not_self = src_all != node
-        src      = src_all[not_self]
-        w_in     = w_all[not_self]
-
-        if src.size > 0:
-            src_com           = communities[src]
-            out_strength_safe = np.where(out_strength > 0, out_strength, 1.0)
-            flow_in           = p[src] * w_in / out_strength_safe[src]
-
-            # Edges comm_src → node were internal; after the move they exit comm_src.
-            mask_src = src_com == comm_src
-            if np.any(mask_src):
-                exit_flow[comm_src] += np.sum(flow_in[mask_src])
-
-            # Edges comm_trg → node were exiting comm_trg; after the move they are internal.
-            mask_trg = src_com == comm_trg
-            if np.any(mask_trg):
-                exit_flow[comm_trg] -= np.sum(flow_in[mask_trg])
-
-    return exit_flow
+    return _update_exit_flow_core(
+        communities.astype(np.int64), p, exit_flow_old, node, node_idx,
+        comm_src, comm_trg, edges, weights, out_strength,
+        out_eids, out_idxptr, in_eids, in_idxptr
+    )
 
 
 def update_node_move_description_length(g,  
@@ -601,7 +666,7 @@ def update_node_move_description_length(g,
     # Nonuniform: fall back to full recompute
     # TODO: implement nonuniform update funcs, if we have the time
     if teleportation == "nonuniform":
-        communities_old = np.array(communities_old)
+        communities_old = np.asarray(communities_old)
         communities_new = communities_old.copy()
         communities_new[node] = comm_trg
         if returnTerms:
@@ -620,7 +685,7 @@ def update_node_move_description_length(g,
                                               verbose=verbose)
 
     # === Uniform path: existing incremental update ===
-    # communities_old = np.array(communities_old)
+    # communities_old = np.asarray(communities_old)
     # communities_new = communities_old.copy()
     # communities_new[node] = comm_trg
 
