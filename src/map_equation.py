@@ -276,6 +276,7 @@ def compute_description_length(g, communities,
                                out_strength=None, 
                                adj=None,
                                p=None,
+                               sum_xlogx_p=None,
                                tau=0.15, 
                                teleportation="uniform",
                                returnTerms=False,
@@ -305,10 +306,12 @@ def compute_description_length(g, communities,
     # handle the edge-case (hehe) of a graph without edges, or nodes:
     if g.ecount() == 0 or N == 0: # graph doesn't have edges or nodes:
         if returnTerms:
-            return 0.0, np.zeros(N), np.zeros(num_communities), np.zeros(num_communities)
+            empty_scalars = {"q_sum": 0.0, "sum_xlogx_q": 0.0,
+                             "sum_xlogx_ploop": 0.0, "sum_xlogx_p": 0.0}
+            return 0.0, np.zeros(N), np.zeros(num_communities), np.zeros(num_communities), empty_scalars
         else:   
             return 0.0
-    
+
     if g.is_directed():
         #adj = np.array(g.get_adjacency(attribute="weight" if g.is_weighted() else None).data, dtype=float)
         if adj is None:
@@ -324,17 +327,23 @@ def compute_description_length(g, communities,
                                           edges=edges,
                                           weights=weights,
                                           out_strength=out_strength)
-            
+
             # q_mod includes the teleportation term
             n_mod = np.bincount(communities, minlength=num_communities)
             q_mod = tau * (N - n_mod) / N * p_mod + (1 - tau) * exit_flow
             
-            # symmetric formula (same q for index and module codebook)
+            # assemble terms - symmetric formula (same qs)
+            if sum_xlogx_p is None:
+                sum_xlogx_p = np.sum(safe_xlogx(p))
+
             q_sum = np.sum(q_mod)
             p_loop = p_mod + q_mod
-            L = safe_xlogx(q_sum) - 2 * np.sum(safe_xlogx(q_mod)) \
-                - np.sum(safe_xlogx(p)) + np.sum(safe_xlogx(p_loop))
+            sum_xlogx_q = np.sum(safe_xlogx(q_mod))
+            sum_xlogx_ploop = np.sum(safe_xlogx(p_loop))
+            
+            L = safe_xlogx(q_sum) - 2 * sum_xlogx_q - sum_xlogx_p + sum_xlogx_ploop
             exit_data = exit_flow
+
             
         else:  # nonuniform
             # === Smart unrecorded teleportation ===
@@ -352,34 +361,51 @@ def compute_description_length(g, communities,
                                                        out_strength=out_strength)
             
             # asymmetric formula: enter for index, exit for module
+            # assemble terms
+            if sum_xlogx_p is None:
+                sum_xlogx_p = np.sum(safe_xlogx(p))
+            
             q_enter = enter_flow
             q_exit = exit_flow
             q_enter_sum = np.sum(q_enter)
             p_loop = p_mod + q_exit
+            sum_xlogx_ploop = np.sum(safe_xlogx(p_loop))
+
             L = safe_xlogx(q_enter_sum) - np.sum(safe_xlogx(q_enter)) \
                 - np.sum(safe_xlogx(q_exit)) \
-                - np.sum(safe_xlogx(p)) + np.sum(safe_xlogx(p_loop))
+                - sum_xlogx_p + sum_xlogx_ploop
             exit_data = exit_flow
-            q_mod = exit_flow   # for returnTerms/verbose compatibility
-    
+            # for returnTerms/verbose compatibility:
+            # (even though we don't need these in the nonuniform teleportation case
+            # since we didn't implement any update functions and just recompute)
+            q_mod = exit_flow   
+            q_sum = q_enter_sum
+            sum_xlogx_q = np.sum(safe_xlogx(q_exit))
+
     else:
-        # === Undirected case — same for both teleportation schemes ===
+        # === Undirected case - same for both teleportation schemes ===
         if weights is None:
             weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
         total_weight_x2 = 2 * np.sum(weights)
         if p is None:
             p = np.array(g.strength(weights="weight" if g.is_weighted() else None)) / total_weight_x2
-        
+
         p_mod = np.zeros(num_communities)
         np.add.at(p_mod, communities, p)
         
         exit_weights = compute_exit_weights(g, communities, edges=edges, weights=weights)
         q_mod = exit_weights / total_weight_x2
-        
+
+        # assemble terms
+        if sum_xlogx_p is None:
+            sum_xlogx_p = np.sum(safe_xlogx(p))
+
         q_sum = np.sum(q_mod)
         p_loop = p_mod + q_mod
-        L = safe_xlogx(q_sum) - 2 * np.sum(safe_xlogx(q_mod)) \
-            - np.sum(safe_xlogx(p)) + np.sum(safe_xlogx(p_loop))
+        sum_xlogx_q = np.sum(safe_xlogx(q_mod))
+        sum_xlogx_ploop = np.sum(safe_xlogx(p_loop))
+
+        L = safe_xlogx(q_sum) - 2 * sum_xlogx_q - sum_xlogx_p + sum_xlogx_ploop
         exit_data = exit_weights
     
     if verbose:
@@ -389,13 +415,24 @@ def compute_description_length(g, communities,
         print("exit_data sum:", exit_data.sum())
         print("q_mod sum:    ", q_mod.sum())
         print("p_loop sum:   ", p_loop.sum())
-    
+
     if returnTerms:
-        return L, p, p_mod, exit_data
+        scalars = {
+            "q_sum": q_sum,
+            "sum_xlogx_q": sum_xlogx_q,
+            "sum_xlogx_ploop": sum_xlogx_ploop,
+            "sum_xlogx_p": sum_xlogx_p,
+        }
+        return L, p, p_mod, exit_data, scalars
+
     else:
         return L
     
+#######################################################################
+## UPDATE FUNCTIONS FOR SINGLE-NODE MOVEMENTS #########################
+#######################################################################
 
+# updating exit weights:
 # seperate the core part of the update exit weights mechanism that 
 # numba can work with from the part working with types numba cannot handle
 # i.e. all the igraph stuff, or the incidence dict
@@ -495,7 +532,7 @@ def update_exit_weights(g: ig.Graph,
             comm_src, comm_trg, edges, weights, incident_eids, ip
         )
 
-
+# analogously for exit flows:
 @numba.njit(cache=True)
 def _update_exit_flow_core(communities, p, exit_flow_old, node, node_idx, comm_src, comm_trg,
                            edges, weights, out_strength,
@@ -631,7 +668,7 @@ def update_exit_flow(g: ig.Graph,
     )
 
 
-def update_node_move_description_length(g,  
+def update_node_move_description_length_old(g,  
                                         communities_old,
                                         p_old, 
                                         p_mod_old, 
@@ -648,7 +685,7 @@ def update_node_move_description_length(g,
                                         returnTerms=False,
                                         verbose=False
                                         ):
-    """Compute the change in description length if a single node is moved.
+    """Update the description length if a single node is moved.
 
     Args:
         ... (existing args)
@@ -745,3 +782,169 @@ def update_node_move_description_length(g,
     else:
         return L
 
+
+def update_node_move_description_length(g,
+                                        communities_old,
+                                        p_old,
+                                        p_mod_old,
+                                        exits_old,
+                                        node,
+                                        comm_trg,
+                                        scalars_old=None,
+                                        node_counts_old=None,
+                                        edges=None,
+                                        weights=None,
+                                        out_strength=None,
+                                        incidence_dict=None,
+                                        tau=0.15,
+                                        teleportation="uniform",
+                                        returnTerms=False,
+                                        verbose=False
+                                        ):
+
+    """Compute the difference in description length if a single node is moved.
+
+    Args:
+        ... (existing args)
+        teleportation: "uniform" uses the incremental update (fast).
+            "nonuniform" falls back to a full recompute (slower but correct).
+    """
+    comm_src = communities_old[node]
+    if comm_src == comm_trg:
+        warnings.warn(f"Node already in target community {comm_trg}! No change.")
+        if returnTerms:
+            return None, node_counts_old, p_mod_old, exits_old
+        else:
+            return None
+
+    # Nonuniform: fall back to full recompute
+    # TODO: implement nonuniform update funcs, if we have the time
+    if teleportation == "nonuniform":
+        communities_old = np.asarray(communities_old)
+        communities_new = communities_old.copy()
+        communities_new[node] = comm_trg
+        if returnTerms:
+            L, _, p_mod_new, exit_data, scalars_new = compute_description_length(
+                g, communities_new, tau=tau, teleportation="nonuniform",
+                edges=edges, weights=weights, out_strength=out_strength,
+                returnTerms=True, verbose=verbose
+            )
+            return L, communities_new, p_mod_new, exit_data, scalars_new
+
+        else:
+            return compute_description_length(g, communities_new, tau=tau,
+                                              teleportation="nonuniform",
+                                              edges=edges, 
+                                              weights=weights,
+                                              out_strength=out_strength,
+                                              verbose=verbose)
+
+    if scalars_old is None:
+        raise ValueError("scalars_old is required for the efficient description length update."
+                        "Obtain it from compute_description_length(..., returnTerms=True) "
+                        "or a prior call to this function.")
+
+    # === Uniform path: existing incremental update ===
+    # so technically, q_mod, p_mod (and therefore p_loop) only change in 2 indices,
+    # comm_src and comm_trg, and so we should be able to just compute those diffs
+    # instead of working with the full arrays of length num_communities
+
+    num_communities = len(p_mod_old)
+    N = g.vcount()
+
+    p_node = p_old[node]
+    p_mod_new = p_mod_old.copy()
+    p_mod_new[comm_src] -= p_node
+    p_mod_new[comm_trg] += p_node
+
+    if g.is_directed():
+        if node_counts_old is None: # THIS SHOULDN'T HAPPEN!! (but just in case)
+            communities_new = communities_old.copy()
+            communities_new[node] = comm_trg
+            node_counts = np.bincount(communities_new, minlength=num_communities)
+        else:
+            # only comm_src and comm_trg change, by exactly 1 node each.
+            node_counts = node_counts_old.copy()   # O(num_communities), not O(N)
+            node_counts[comm_src] -= 1
+            node_counts[comm_trg] += 1
+
+        exit_flow_new = update_exit_flow(g, communities_old,
+                                         p_old, exits_old,
+                                         node, comm_src, comm_trg,
+                                         edges=edges, weights=weights, 
+                                         out_strength=out_strength,
+                                         incidence_dict=incidence_dict)
+        # compute the new q_mods for the src/trg comms only
+        q_src_new = (tau * (N - node_counts[comm_src]) / N * p_mod_new[comm_src]
+                    + (1 - tau) * exit_flow_new[comm_src])
+        q_trg_new = (tau * (N - node_counts[comm_trg]) / N * p_mod_new[comm_trg]
+                    + (1 - tau) * exit_flow_new[comm_trg])
+        
+        exit_data_new = exit_flow_new
+
+    else:
+        if weights is None:
+            weights = np.array(g.es["weight"] if g.is_weighted()
+                               else np.ones(g.ecount(), dtype=np.float64))
+        total_weight_x2 = 2 * np.sum(weights)
+        exit_weights_new = update_exit_weights(g, communities_old, exits_old, node,
+                                               comm_src, comm_trg,
+                                               edges=edges, weights=weights,
+                                               incidence_dict=incidence_dict)
+        q_src_new = exit_weights_new[comm_src] / total_weight_x2
+        q_trg_new = exit_weights_new[comm_trg] / total_weight_x2
+        exit_data_new = exit_weights_new
+        node_counts = None
+
+    # get the old q_mod at src comm
+    q_src_old = ( (tau * (N - (node_counts_old[comm_src] if node_counts_old is not None else 0)) / N
+                  * p_mod_old[comm_src] + (1 - tau) * exits_old[comm_src])
+                 if g.is_directed() else exits_old[comm_src] / (2 * np.sum(weights)) )
+    # get the old q_modat trg comm
+    q_trg_old = ( (tau * (N - (node_counts_old[comm_trg] if node_counts_old is not None else 0)) / N
+                  * p_mod_old[comm_trg] + (1 - tau) * exits_old[comm_trg])
+                 if g.is_directed() else exits_old[comm_trg] / (2 * np.sum(weights)) )
+
+    # get the old/new p_loop terms at comm_src/trg
+    pl_src_old = p_mod_old[comm_src] + q_src_old
+    pl_trg_old = p_mod_old[comm_trg] + q_trg_old
+    pl_src_new = p_mod_new[comm_src] + q_src_new
+    pl_trg_new = p_mod_new[comm_trg] + q_trg_new
+
+    # now update the running scalars (q_sum, sum_xlogx_q, sum_xlogx_ploop)
+    q_sum_new = (scalars_old["q_sum"] - q_src_old - q_trg_old \
+                 + q_src_new + q_trg_new)
+ 
+    sum_xlogx_q_new = (scalars_old["sum_xlogx_q"]
+                      - safe_xlogx(q_src_old) - safe_xlogx(q_trg_old)
+                      + safe_xlogx(q_src_new) + safe_xlogx(q_trg_new))
+ 
+    sum_xlogx_ploop_new = (scalars_old["sum_xlogx_ploop"]
+                          - safe_xlogx(pl_src_old) - safe_xlogx(pl_trg_old)
+                          + safe_xlogx(pl_src_new) + safe_xlogx(pl_trg_new))
+
+    # this one remains constant
+    sum_xlogx_p = scalars_old["sum_xlogx_p"]  
+
+    # compute description length
+    L = safe_xlogx(q_sum_new) - 2 * sum_xlogx_q_new - sum_xlogx_p + sum_xlogx_ploop_new
+
+    # update running scalar dict with new values
+    scalars_new = {
+        "q_sum": q_sum_new,
+        "sum_xlogx_q": sum_xlogx_q_new,
+        "sum_xlogx_ploop": sum_xlogx_ploop_new,
+        "sum_xlogx_p": sum_xlogx_p,
+    }
+
+    if verbose:
+        print("p sum:        ", p_old.sum())
+        print("p_mod sum:    ", p_mod_new.sum())
+        print("q_mod sum:    ", q_sum_new)
+
+    node_counts_new = node_counts if g.is_directed() else None
+ 
+    if returnTerms:
+        return L, node_counts_new, p_mod_new, exit_data_new, scalars_new
+    else:
+        return L
