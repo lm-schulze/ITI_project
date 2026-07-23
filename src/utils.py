@@ -5,6 +5,7 @@ import csv
 import json
 import os
 from torch_geometric.datasets import WikiCS
+from typing import Optional
 
 
 def generate_sbm(n, c, p_in, p_out, directed=False, weighted=False):
@@ -188,3 +189,24 @@ def append_csv_row(path: str, fieldnames: list[str], row: dict) -> None:
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
+
+def load_json(path: str) -> Optional[dict]:
+    if not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def trial_already_done(path: str) -> bool:
+    """A trial file counts as 'done' if it exists and contains valid JSON
+    with a 'status' == 'completed' field. This guards against half-written
+    files left behind by an interrupted run."""
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r") as f:
+            content = json.load(f)
+        return content.get("status") == "completed"
+    except (json.JSONDecodeError, OSError):
+        return False
