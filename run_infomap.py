@@ -103,8 +103,7 @@ def run_infomap_pkg(g: ig.Graph, directed: bool, out_dir: str):
         g,
         two_level=True,
         directed=directed,
-        num_trials=NUM_TRIALS,
-        seed=0,
+        num_trials=NUM_TRIALS
     )
     t_elapsed = time.perf_counter() - t0
 
@@ -136,12 +135,6 @@ def run_variant(directed: bool):
     dir = f"{RESULTS_ROOT}/{variant}"
     Path(dir).mkdir(parents=True, exist_ok=True)
 
-    # run custom
-    print("Running custom infomap ...")
-    res_custom = run_custom(g, dir)
-    ut.append_csv_row(f"{dir}/summary.csv", res_custom.keys(), res_custom)
-    print(f"[custom]: L = {res_custom['codelength']:.6f} bits")
-
     # run igraph
     print("Running igraph infomap ...")
     res_ig = run_igraph(g, dir)
@@ -152,7 +145,13 @@ def run_variant(directed: bool):
     print("Running infomap pkg ...")
     res_im = run_infomap_pkg(g, directed, dir)
     ut.append_csv_row(f"{dir}/summary.csv", res_im.keys(), res_im)
-    print(f"[custom]: L = {res_im['codelength']:.6f} bits")
+    print(f"[infomap pkg]: L = {res_im['codelength']:.6f} bits")
+
+    # run custom
+    print("Running custom infomap ...")
+    res_custom = run_custom(g, dir)
+    ut.append_csv_row(f"{dir}/summary.csv", res_custom.keys(), res_custom)
+    print(f"[custom]: L = {res_custom['codelength']:.6f} bits")
     
     runtime = time.perf_counter() - t_start
     print(f"Runtime for {variant} WikiCS (s): {runtime:.2f}")
