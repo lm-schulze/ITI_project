@@ -223,6 +223,7 @@ def compress_network(g: ig.Graph, communities: list[int],
 def node_movement_optimization(g, 
                                initial_communities=None, 
                                teleportation="uniform",
+                               tol = 1e-10,
                                cache=None, 
                                returnTerms=False, 
                                verbose=False):
@@ -333,7 +334,10 @@ def node_movement_optimization(g,
                     incidence_dict=cache["incidence"],
                     teleportation=teleportation, returnTerms=True
                 )
-                if L_new is not None and L_new < L_best: # improvement was made
+                if L_new is not None and L_new < L_best - tol: # improvement was made
+                    if verbose:
+                        print(f"Improved description length: {L_best} -> {L_new}")
+                        print(f"by moving node {n}: {src_comm} -> {nbc}")
                     L_best = L_new
                     best_comm = nbc
                     p_mod_best = p_mod_new      # already a fresh array from the helper
@@ -388,7 +392,7 @@ def node_movement_optimization(g,
         return communities
     
 
-def core_search_algorithm(g:ig.Graph, teleportation="uniform", cache=None, verbose=False):
+def core_search_algorithm(g:ig.Graph, teleportation="uniform", cache=None, verbose=False, tol= 1e-10):
     """Runs core algorithm of the infomap community partition search algorithm, without any
     refinement steps. Follows the description in "The map equation" (M. Rosvall, D. Axelsson, and C.T. Bergstrom, 2009).
     Alternates between node-movement optimization and network compression until no further improvements can be made.
@@ -441,7 +445,7 @@ def core_search_algorithm(g:ig.Graph, teleportation="uniform", cache=None, verbo
             print(f"    Phase 1 found {n_communities} communities")
 
         # if no improvement has been made in node movement optimization, exit loop
-        if L_after >= L_before:
+        if L_after + tol >= L_before:
             if verbose:
                 print("    Node movement did not improve codelength, stopping optimization.")
             break
