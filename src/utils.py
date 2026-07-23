@@ -1,6 +1,10 @@
 import igraph as ig
 import numpy as np
 from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score
+import csv
+import json
+import os
+from torch_geometric.datasets import WikiCS
 
 
 def generate_sbm(n, c, p_in, p_out, directed=False, weighted=False):
@@ -120,3 +124,67 @@ def compare_partitions(comms1, comms2):
     print(f"Adjusted Rand Index: {ari:.4f}")  # between -0.5 and 1.0, 0 -> random, 1.0 -> identical
 
     #return nmi, jaccard, ari
+
+# helpers for running things on WikiCS
+# WikiCS loading
+def load_wikics_graph(directed: bool, data_root: str = "../data/WikiCS", print_info=False) -> ig.Graph:
+    """
+    Load the WikiCS dataset via torch_geometric and convert it into an
+    igraph.Graph, restricted to its largest connected component (LCC),
+    mirroring exactly what was done in Wikipedia.ipynb.
+
+    Parameters
+    ----------
+    directed : bool
+        If True, keep WikiCS edges as directed.
+        If False, collapse to an undirected graph before extracting the LCC.
+    data_root : str
+        Path passed to `torch_geometric.datasets.WikiCS(...)`.
+
+    Returns
+    -------
+    ig.Graph
+        The largest connected component of the (un)directed WikiCS graph.
+    """
+
+    dataset = WikiCS(data_root, is_undirected= not directed)
+    data = dataset[0] # there's only one graph in the dataset
+
+    if print_info:
+        print(data) #edge_index holds src dst node indices
+        # Gather some statistics about the graph.
+        print(f'Number of nodes: {data.num_nodes}')
+        print(f'Number of edges: {data.num_edges}')
+        print(f'Average node degree: {data.num_edges / data.num_nodes:.2f}')
+        print(f'Has isolated nodes: {data.has_isolated_nodes()}')
+        print(f'Has self-loops: {data.has_self_loops()}')
+        print(f'Is undirected: {data.is_undirected()}')
+
+    edges = data.edge_index.t().tolist()
+    g = ig.Graph(n=data.num_nodes, edges=edges, directed=directed)
+
+    if not directed: # just in case
+        g = g.as_undirected()
+    # extracting lcc
+    components = g.connected_components()
+    lcc = components.giant()
+    return lcc
+
+def atomic_write_json(path: str, obj: dict) -> None:
+    """Write JSON atomically: write to a temp file then rename, so a crash
+    mid-write never leaves a corrupt/half-written result file behind"""
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(obj, f, indent=2)
+    os.replace(tmp_path, path)
+
+
+def append_csv_row(path: str, fieldnames: list[str], row: dict) -> None:
+    """Append a single row to a CSV file, writing the header if the file is
+    new."""
+    file_exists = os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
