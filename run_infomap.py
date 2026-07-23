@@ -16,10 +16,7 @@ import time
 import numpy as np
 import igraph as ig
 import infomap
-
 from pathlib import Path
-
-
 sys.path.append(".")  # so `import src....` works when run from project root
 
 import src.optimize as opt
@@ -153,10 +150,10 @@ def run_variant(directed: bool):
 
     # run infomap package
     print("Running infomap pkg ...")
-    res_im = run_infomap_pkg(g, dir)
+    res_im = run_infomap_pkg(g, directed, dir)
     ut.append_csv_row(f"{dir}/summary.csv", res_im.keys(), res_im)
     print(f"[custom]: L = {res_im['codelength']:.6f} bits")
-
+    
     runtime = time.perf_counter() - t_start
     print(f"Runtime for {variant} WikiCS (s): {runtime:.2f}")
 
