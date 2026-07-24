@@ -116,6 +116,15 @@ def plot_S(S, G):
     plt.show()
 
 
+def get_hard_clusters(S):
+    hard = S.argmax(dim = 1).cpu().numpy()
+    y    = []
+    cluster_to_ID = dict((cluster,ix) for ix,cluster in enumerate(set(hard)))
+    for cluster in hard:
+        y.append(cluster_to_ID[cluster])
+    return y
+
+
 def to_dataset(G: nx.Graph, y_true: List[int]) -> Data:
     """
     Takes a networkx graph and a list of community labels for the nodes and
