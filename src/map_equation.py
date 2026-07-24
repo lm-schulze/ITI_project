@@ -277,6 +277,7 @@ def compute_description_length(g, communities,
                                adj=None,
                                p=None,
                                sum_xlogx_p=None,
+                               total_weight_x2=None,
                                tau=0.15, 
                                teleportation="uniform",
                                returnTerms=False,
@@ -386,7 +387,10 @@ def compute_description_length(g, communities,
         # === Undirected case - same for both teleportation schemes ===
         if weights is None:
             weights = np.array(g.es["weight"] if g.is_weighted() else np.ones(g.ecount(), dtype=np.float64))
-        total_weight_x2 = 2 * np.sum(weights)
+
+        if total_weight_x2 is None:
+            total_weight_x2 = 2 * np.sum(weights)
+
         if p is None:
             p = np.array(g.strength(weights="weight" if g.is_weighted() else None)) / total_weight_x2
 
@@ -680,6 +684,7 @@ def update_node_move_description_length_old(g,
                                         weights=None,
                                         out_strength=None,
                                         incidence_dict=None,
+                                        total_weight_x2=None,
                                         tau=0.15,
                                         teleportation="uniform",
                                         returnTerms=False,
@@ -756,7 +761,9 @@ def update_node_move_description_length_old(g,
         if weights is None:
             weights = np.array(g.es["weight"] if g.is_weighted()
                                else np.ones(g.ecount(), dtype=np.float64))
-        total_weight_x2 = 2 * np.sum(weights)
+
+        if total_weight_x2 is None:
+            total_weight_x2 = 2 * np.sum(weights)
         exit_weights_new = update_exit_weights(g, communities_old, exits_old, node,
                                                comm_src, comm_trg,
                                                edges=edges, weights=weights,
@@ -796,6 +803,7 @@ def update_node_move_description_length(g,
                                         weights=None,
                                         out_strength=None,
                                         incidence_dict=None,
+                                        total_weight_x2=None,
                                         tau=0.15,
                                         teleportation="uniform",
                                         returnTerms=False,
@@ -886,7 +894,10 @@ def update_node_move_description_length(g,
         if weights is None:
             weights = np.array(g.es["weight"] if g.is_weighted()
                                else np.ones(g.ecount(), dtype=np.float64))
-        total_weight_x2 = 2 * np.sum(weights)
+
+        if total_weight_x2 is None:
+            total_weight_x2 = 2 * np.sum(weights)
+
         exit_weights_new = update_exit_weights(g, communities_old, exits_old, node,
                                                comm_src, comm_trg,
                                                edges=edges, weights=weights,
@@ -899,11 +910,11 @@ def update_node_move_description_length(g,
     # get the old q_mod at src comm
     q_src_old = ( (tau * (N - (node_counts_old[comm_src] if node_counts_old is not None else 0)) / N
                   * p_mod_old[comm_src] + (1 - tau) * exits_old[comm_src])
-                 if g.is_directed() else exits_old[comm_src] / (2 * np.sum(weights)) )
+                 if g.is_directed() else exits_old[comm_src] / total_weight_x2 )
     # get the old q_modat trg comm
     q_trg_old = ( (tau * (N - (node_counts_old[comm_trg] if node_counts_old is not None else 0)) / N
                   * p_mod_old[comm_trg] + (1 - tau) * exits_old[comm_trg])
-                 if g.is_directed() else exits_old[comm_trg] / (2 * np.sum(weights)) )
+                 if g.is_directed() else exits_old[comm_trg] / total_weight_x2 )
 
     # get the old/new p_loop terms at comm_src/trg
     pl_src_old = p_mod_old[comm_src] + q_src_old

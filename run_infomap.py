@@ -157,10 +157,10 @@ def run_variant(directed: bool):
     print(f"Runtime for {variant} WikiCS (s): {runtime:.2f}")
 
 
-def main():
-    Path(RESULTS_ROOT).mkdir(parents=True, exist_ok=True)
-    for directed in (True, False):
-        run_variant(directed)
+# def main():
+#     Path(RESULTS_ROOT).mkdir(parents=True, exist_ok=True)
+#     for directed in (True, False):
+#         run_variant(directed)
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

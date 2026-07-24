@@ -166,9 +166,11 @@ def load_wikics_graph(directed: bool, data_root: str = "../data/WikiCS", print_i
 
     if not directed: # just in case
         g = g.as_undirected()
-    # extracting lcc
+    # extracting lcc & aggregate multiedges
     components = g.connected_components()
-    lcc = components.giant()
+    lcc = components.giant().simplify(multiple=True, loops=False, combine_edges="sum")
+    if print_info:
+        print(f"LCC: {lcc.summary()}")
     return lcc
 
 def atomic_write_json(path: str, obj: dict) -> None:

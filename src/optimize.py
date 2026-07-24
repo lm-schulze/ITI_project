@@ -73,6 +73,10 @@ def build_graph_cache(g: ig.Graph, teleportation="uniform") -> dict:
     )
     cache = {"edges": edges, "weights": weights}
 
+    cache["total_weight_x2"] = (2 * np.sum(weights)) # we only need it in undirected case, but oh well
+    if cache["total_weight_x2"] <= 0.0: 
+        cache["total_weight_x2"] = 1.0 # to avoid divide by 0 issues
+
     if g.is_directed():
         # get out strengths
         cache["out_strength"] = np.array(
@@ -86,11 +90,12 @@ def build_graph_cache(g: ig.Graph, teleportation="uniform") -> dict:
         else: # nonuniform
             cache["p"] = meq.pagerank_nonuniform(cache["adj"])
 
+
     else:
         cache["out_strength"] = None  # not used in undirected branch
         cache["adj"] = None # dito
         # get node visit frequencies
-        cache["p"] = np.array(g.strength(weights="weight" if g.is_weighted() else None)) / (2 * np.sum(weights))
+        cache["p"] = np.array(g.strength(weights="weight" if g.is_weighted() else None)) / cache["total_weight_x2"]
 
     # precompute reusable term for map equation
     cache["sum_xlogx_p"] = np.sum(meq.safe_xlogx(cache["p"]))
@@ -281,7 +286,8 @@ def node_movement_optimization(g,
     L, p, p_mod, exit_data, scalars = meq.compute_description_length(
         g, communities, teleportation=teleportation, edges=cache["edges"],
         weights=cache["weights"], out_strength=cache["out_strength"],
-        adj=cache["adj"], p=cache["p"], sum_xlogx_p=cache["sum_xlogx_p"], returnTerms=True
+        adj=cache["adj"], p=cache["p"], sum_xlogx_p=cache["sum_xlogx_p"], 
+        total_weight_x2=cache["total_weight_x2"], returnTerms=True
     )
 
     # TODO: put node_counts as a compute_description_length return term?
@@ -332,12 +338,13 @@ def node_movement_optimization(g,
                     edges=cache["edges"], weights=cache["weights"], 
                     out_strength=cache["out_strength"],
                     incidence_dict=cache["incidence"],
+                    total_weight_x2=cache["total_weight_x2"],
                     teleportation=teleportation, returnTerms=True
                 )
-                if L_new is not None and L_new < L_best - tol: # improvement was made
-                    if verbose:
-                        print(f"Improved description length: {L_best} -> {L_new}")
-                        print(f"by moving node {n}: {src_comm} -> {nbc}")
+                if L_new is not None and L_new < L_best -tol : # improvement was made
+                    # if verbose:
+                    #     print(f"Improved description length: {L_best} -> {L_new}")
+                    #     print(f"by moving node {n}: {src_comm} -> {nbc}")
                     L_best = L_new
                     best_comm = nbc
                     p_mod_best = p_mod_new      # already a fresh array from the helper
@@ -368,7 +375,8 @@ def node_movement_optimization(g,
         L, p, p_mod, exit_data, scalars = meq.compute_description_length(
             g, communities, teleportation=teleportation, edges=cache["edges"],
             weights=cache["weights"], out_strength=cache["out_strength"],
-            adj = cache["adj"], p=cache["p"], sum_xlogx_p=cache["sum_xlogx_p"], returnTerms=True
+            adj = cache["adj"], p=cache["p"], sum_xlogx_p=cache["sum_xlogx_p"],
+            total_weight_x2=cache["total_weight_x2"], returnTerms=True
             )
         # TODO: include node_counts in description length return terms??
         num_communities = len(p_mod)
@@ -430,7 +438,8 @@ def core_search_algorithm(g:ig.Graph, teleportation="uniform", cache=None, verbo
                                                   out_strength=cache_current["out_strength"],
                                                   adj = cache_current["adj"],
                                                   p=cache_current["p"],
-                                                  sum_xlogx_p=cache_current["sum_xlogx_p"]
+                                                  sum_xlogx_p=cache_current["sum_xlogx_p"],
+                                                  total_weight_x2=cache_current["total_weight_x2"]
                                                   )
     
         # --- Phase 1: optimization via single-node moves ---
@@ -445,7 +454,7 @@ def core_search_algorithm(g:ig.Graph, teleportation="uniform", cache=None, verbo
             print(f"    Phase 1 found {n_communities} communities")
 
         # if no improvement has been made in node movement optimization, exit loop
-        if L_after + tol >= L_before:
+        if L_after >= L_before - tol:
             if verbose:
                 print("    Node movement did not improve codelength, stopping optimization.")
             break
@@ -590,7 +599,8 @@ def submodule_movement_optimization(g: ig.Graph,
                                               out_strength=cache["out_strength"],
                                               adj=cache["adj"],
                                               p=cache["p"],
-                                              sum_xlogx_p=cache["sum_xlogx_p"]
+                                              sum_xlogx_p=cache["sum_xlogx_p"],
+                                              total_weight_x2=cache["total_weight_x2"],
                                               )
 
     # Normalise community labels to contiguous 0-indexed integers.
@@ -707,6 +717,7 @@ def submodule_movement_optimization(g: ig.Graph,
                                               adj = cache["adj"],
                                               p=cache["p"],
                                               sum_xlogx_p=cache["sum_xlogx_p"],
+                                              total_weight_x2=cache["total_weight_x2"],
                                               teleportation=teleportation)
 
     if verbose:
@@ -766,7 +777,8 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
                                                      out_strength=cache['out_strength'], 
                                                      adj=cache['adj'],
                                                      p=cache["p"],
-                                                     sum_xlogx_p=cache["sum_xlogx_p"])
+                                                     sum_xlogx_p=cache["sum_xlogx_p"],
+                                                     total_weight_x2=cache["total_weight_x2"])
             print(f"Starting from description length L = {L_trivial} bits (with trivial parititon)")
 
         comms_initial = core_search_algorithm(g, teleportation=teleportation, cache=cache,
@@ -780,7 +792,8 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
                                                        out_strength=cache["out_strength"],
                                                        adj = cache["adj"],
                                                        p=cache["p"],
-                                                       sum_xlogx_p=cache["sum_xlogx_p"])
+                                                       sum_xlogx_p=cache["sum_xlogx_p"],
+                                                       total_weight_x2=cache["total_weight_x2"])
             print(f"Initial partition found by core search algorithm has description length L = {L_initial:.6f} bits")
             print(f"--- Starting refinement process...\n")
 
@@ -796,7 +809,8 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
                                                       out_strength=cache["out_strength"], 
                                                       adj = cache["adj"],
                                                       p=cache["p"],
-                                                      sum_xlogx_p=cache["sum_xlogx_p"])
+                                                      sum_xlogx_p=cache["sum_xlogx_p"],
+                                                      total_weight_x2=cache["total_weight_x2"])
             # submodule refinement
             comms_level = submodule_movement_optimization(g, comms_level, 
                                                           teleportation=teleportation,
@@ -814,7 +828,8 @@ def search_community_partition(g:ig.Graph, num_restarts:int=10, max_iter:int=100
                                                      out_strength=cache["out_strength"],
                                                      adj = cache["adj"],
                                                      p=cache["p"],
-                                                     sum_xlogx_p=cache["sum_xlogx_p"])
+                                                     sum_xlogx_p=cache["sum_xlogx_p"],
+                                                     total_weight_x2=cache["total_weight_x2"])
             if verbose:
                 print(f"--- Refinement: Finished Iteration {i+1}")
                 print(f"        L_before={L_before:.6f}, L_after={L_after:.6f}")

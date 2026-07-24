@@ -177,9 +177,9 @@ class Neuromap_with_loss_tracking(nm.Neuromap):
                 loss, s = self.forward(x = x)
 
                 if loss < l_best:
-                    l_best         = float(loss)
+                    l_best = float(loss)
                     no_improvement = 0
-                    s_best         = s
+                    s_best = s
                 else:
                     no_improvement += 1
 
@@ -300,7 +300,6 @@ def main():
     Path(RESULTS_ROOT).mkdir(parents=True, exist_ok=True)
     for directed in (True, False):
         run_variant(directed)
-
 
 if __name__ == "__main__":
     main()
