@@ -1,6 +1,7 @@
 import igraph as ig
 import numpy as np
-from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score
+from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score, adjusted_mutual_info_score
+
 import csv
 import json
 import os
@@ -97,7 +98,7 @@ def visual_community_colors(g: ig.Graph, communities=None, skipLayout=False):
     return visual_style
 
 
-def compare_partitions(comms1, comms2):
+def compare_partitions(comms1, comms2, print_results=False):
     """Small helper function to compare 2 community assignments for the same graph. 
     Prints number of communities, normalized mutual information, and adjusted Rand score.
 
@@ -114,17 +115,21 @@ def compare_partitions(comms1, comms2):
     n_comms1 = len(set(comms1))
     n_comms2 = len(set(comms2))
 
-    print(f"Comparing partitions:\nPartition 1: {n_comms1} communities\nPartition 2: {n_comms2} communities")
+    if print_results:
+        print(f"Comparing partitions:\nPartition 1: {n_comms1} communities\nPartition 2: {n_comms2} communities")
 
     nmi = normalized_mutual_info_score(comms1, comms2)
+    ami = adjusted_mutual_info_score(comms1, comms2)
     ari = adjusted_rand_score(comms1, comms2)
 
-    print(f"Normalized Mututal Information: {nmi:.4f}") # that one we know, between 0 and 1, if 1 -> identical partition
-    # Rand score: label agreements/(label agreements + label disagreements), again, between 0 and 1, 1 -> identical partition
-    # Adjusted rand score: "Adjusted for change": (RI - Expected_RI) / (max(RI) - Expected_RI)
-    print(f"Adjusted Rand Index: {ari:.4f}")  # between -0.5 and 1.0, 0 -> random, 1.0 -> identical
+    if print_results:
+        print(f"Normalized Mutual Information: {nmi:.4f}") # that one we know, between 0 and 1, if 1 -> identical partition
+        print(f"Adjusted Mutual Information: {ami:.4f}")
+        # Rand score: label agreements/(label agreements + label disagreements), again, between 0 and 1, 1 -> identical partition
+        # Adjusted rand score: "Adjusted for change": (RI - Expected_RI) / (max(RI) - Expected_RI)
+        print(f"Adjusted Rand Index: {ari:.4f}")  # between -0.5 and 1.0, 0 -> random, 1.0 -> identical
 
-    #return nmi, jaccard, ari
+    return nmi, ami, ari
 
 # helpers for running things on WikiCS
 # WikiCS loading
@@ -163,6 +168,7 @@ def load_wikics_graph(directed: bool, data_root: str = "../data/WikiCS", print_i
 
     edges = data.edge_index.t().tolist()
     g = ig.Graph(n=data.num_nodes, edges=edges, directed=directed)
+    g.vs["community"] = data.y.tolist()
 
     if not directed: # just in case
         g = g.as_undirected()
