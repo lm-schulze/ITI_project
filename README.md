@@ -13,11 +13,12 @@ For Infomap, we implement the core map equation (description length computation)
 For Neuromap, we test three encoder architectures; a Graph Convolutional Network (GCN), GraphSAGE, and FastGCN, in order to compare how architecture choice affects the resulting communities and codelength.
 
 The project consists of the following files and folders (to be updated as the project progresses):
-- **test_graphs/**: folder containing test graphs exported as GraphML, (weighted/unweighted, directed/undirected); as well as visualizations of each graph as .pdf
+- **test_graphs/**: folder containing small test graphs exported as GraphML, (weighted/unweighted, directed/undirected); as well as visualizations of each graph as .pdf
 - **src/**: folder containing the implemented functions for infomap
-  - `map_equation.py`: function definitions shared between the notebooks
-  - `optimize.py`: functions for computing & updating description length, and performing the search for an optimal community partition.
-  - `utils.py`: helper functions used to generate & visualise test networks.
+  - `map_equation.py`: functions for computing & updating description length via map equation.
+  - `optimize.py`:  functions for the optimization algorithm to search for an optimal community partition.
+  - `utils.py`: helper functions used to generate & visualise test networks, load WikiCS, and write result files.
+  - `neuromap.py`: helper functions & classes for the neuromap community detection, taken from the [official Neuromap repository](https://github.com/chrisbloecker/neuromap).
 - **notebooks/**: folder containing the notebooks used to test and compare the different components of the infomap implementation, using igraph
   - `Test_networks.ipynb`: Jupyter notebook containing the SBM-based graph generation function used to generate the test graphs.
   - `Test_infomap.ipynb`: Jupyter notebook testing a self-implemented version of the Infomap description length computation via map equation, as well as custom update functions.
@@ -25,3 +26,7 @@ The project consists of the following files and folders (to be updated as the pr
   - `SubmoduleRefinement.ipynb`: Jupyter notebook testing the recursive submodule refinement step and the full infomap workflow, validated against igraph's `community_infomap` and against the ground-truth partition.
   - `uniform.ipynb`: map equation with uniform recorded teleportation (matches Laura's setup, sanity check).
   - `non-uniform.ipynb`: map equation with smart unrecorded teleportation (tutorial's recommended scheme).
+  - `WikiCS_analysis.ipynb`: Jupyter notebook for loading and plotting the results of infomap/neuromap community detection on the WikiCS dataset
+- `run_infomap_trials.py`: python script to run different infomap implementations on the WikiCS dataset.
+- `run_neuromap.py`: python script to run neuromap with different GNN architectures on the WikiCS dataset.
+
