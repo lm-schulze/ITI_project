@@ -1,12 +1,12 @@
 # Information Theory and Inference project: Maps of random walks on complex networks reveal community structure
-Course project for the course *Information Theory and Inference* at the University of Padova, A.Y. 2025/2026. The project is based on the paper ["Maps of random walks on complex networks reveal community structure"](https://doi.org/10.1073/pnas.0706851105). Details to be added.
+Course project for the course *Information Theory and Inference* at the University of Padova, A.Y. 2025/2026.
+
 Contributors:
 - Marco Foster ([@MarcoTFoster](https://github.com/MarcoTFoster))
 - Laura Schulze ([@lm-schulze](https://github.com/lm-schulze))
 - Savina Tsichli ([@savinats](https://github.com/savinats))
 
-This project implements and compares two approaches to community detection based on the map equation: the classic **Infomap** algorithm, which uses a 
-greedy stochastic search to optimize the map equation directly, and **Neuromap**, which learns a soft cluster assignment matrix end-to-end via a neural network and gradient descent. 
+This project implements and compares two approaches to community detection based on the map equation: the classic **Infomap** algorithm (see ["Maps of random walks on complex networks reveal community structure"](https://doi.org/10.1073/pnas.0706851105).), which uses a greedy stochastic search to optimize the map equation directly, and **Neuromap** (see ["The Map Equation Goes Neural: Mapping Network Flows with Graph Neural Networks"](https://doi.org/10.52202/079017-0554)), which learns a soft cluster assignment matrix end-to-end via a graph neural network and gradient descent. 
 
 For Infomap, we implement the core map equation (description length computation), the search algorithm for finding optimal partitions, and the submodule refinement step, validating our implementation against igraph and the official Infomap package.
 
